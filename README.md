@@ -4,32 +4,22 @@
 
 ## 从 GitHub 安装
 
-### PowerShell 自动安装（Windows x64）
+### 下载 ZIP 后安装（Windows x64）
 
-不需要预先安装 Python、Node.js 或 Git。打开普通 PowerShell，切换到你希望存放项目的文件夹，复制执行以下整段。它会建立一个新的 `VideoScript` 文件夹；如果已存在则停止，避免覆盖现有项目。
+不需要预先安装 Python、Node.js 或 Git。按下面四步操作：
 
-```powershell
-$ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$installRoot = Join-Path (Get-Location) 'VideoScript'
-if (Test-Path -LiteralPath $installRoot) { throw 'VideoScript already exists. Open that folder and run Install.ps1 instead.' }
-$downloadId = [guid]::NewGuid().ToString('N')
-$archive = Join-Path ([IO.Path]::GetTempPath()) "VideoScript-$downloadId.zip"
-$unpack = Join-Path ([IO.Path]::GetTempPath()) "VideoScript-$downloadId"
-Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/poloveoh/VideoScript/archive/refs/heads/main.zip' -OutFile $archive
-Expand-Archive -LiteralPath $archive -DestinationPath $unpack
-Copy-Item -LiteralPath (Join-Path $unpack 'VideoScript-main') -Destination $installRoot -Recurse
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installRoot 'Install.ps1')
-if ($LASTEXITCODE -ne 0) { throw 'Installation did not finish. Check the error above before retrying.' }
-```
-
-已有完整项目时，在项目目录执行下面这一行即可，不必重新下载项目：
+1. 在仓库页面点击 **Code → Download ZIP**。
+2. 解压到你自己选择、且有写入权限的位置；首次安装前可以修改文件夹名称。
+3. 打开包含 `Install.ps1` 的文件夹，在文件资源管理器地址栏输入 `powershell`，按 Enter。
+4. 复制下面这一行，粘贴到 PowerShell 后按 Enter：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
 ```
 
-安装器下载 uv、便携版 Node.js LTS、Python 3.12、锁定的 Python 依赖（包括 Streamlit、yt-dlp/EJS、faster-whisper 和 FFmpeg），检查依赖，然后下载 Small 多语言模型并启动界面。运行环境保存在项目的 `.tools/` 和 `.venv/`，模型保存在 `data/models/`；不修改系统 PATH，不注册系统 Python，不要求 NVIDIA / CUDA，也不需要付费转录 API。
+安装器会以 `Install.ps1` 所在的文件夹为安装位置，自动准备 Python、Node.js、所需组件和 Small 多语言模型，完成后启动工具。首次安装需要联网，等待安装完成即可。
+
+**以后使用：** 在同一文件夹双击 `Start.cmd` 启动，双击 `Stop.cmd` 停止。搬迁文件夹后，按下一节执行同一行修复。
 
 ### 文件夹搬迁后，一行修复
 
