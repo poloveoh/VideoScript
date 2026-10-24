@@ -4,6 +4,61 @@
 
 ## 从 GitHub 安装
 
+### PowerShell 自动安装（Windows x64）
+
+不需要预先安装 Python、Node.js 或 Git。打开普通 PowerShell，切换到你希望存放项目的文件夹，复制执行以下整段。它会建立一个新的 `VideoScript` 文件夹；如果已存在则停止，避免覆盖现有项目。
+
+```powershell
+$ErrorActionPreference = 'Stop'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$installRoot = Join-Path (Get-Location) 'VideoScript'
+if (Test-Path -LiteralPath $installRoot) { throw 'VideoScript already exists. Open that folder and run Install.ps1 instead.' }
+$downloadId = [guid]::NewGuid().ToString('N')
+$archive = Join-Path ([IO.Path]::GetTempPath()) "VideoScript-$downloadId.zip"
+$unpack = Join-Path ([IO.Path]::GetTempPath()) "VideoScript-$downloadId"
+Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/poloveoh/VideoScript/archive/refs/heads/main.zip' -OutFile $archive
+Expand-Archive -LiteralPath $archive -DestinationPath $unpack
+Copy-Item -LiteralPath (Join-Path $unpack 'VideoScript-main') -Destination $installRoot -Recurse
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $installRoot 'Install.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'Installation did not finish. Check the error above before retrying.' }
+```
+
+已有完整项目时，在项目目录执行下面这一行即可，不必重新下载项目：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
+```
+
+安装器下载 uv、便携版 Node.js LTS、Python 3.12、锁定的 Python 依赖（包括 Streamlit、yt-dlp/EJS、faster-whisper 和 FFmpeg），检查依赖，然后下载 Small 多语言模型并启动界面。运行环境保存在项目的 `.tools/` 和 `.venv/`，模型保存在 `data/models/`；不修改系统 PATH，不注册系统 Python，不要求 NVIDIA / CUDA，也不需要付费转录 API。
+
+下载源为 Astral 官方 GitHub、nodejs.org、Python 包仓库及 Hugging Face 模型仓库。Node.js ZIP 会校验官方 SHA256。首次安装需要网络、足够磁盘空间和执行权限；学校 / 公司策略、网络限制或缺失的系统运行库可能使安装失败，脚本会报错停止。没有在所有 Windows 电脑上验证过。安装后请保留 `.tools/`，单独移动 `.venv/` 会破坏路径。
+
+可选参数：`-SkipModel` 暂不下载模型，`-NoLaunch` 安装后不打开工具。默认只准备 Small，不会预先下载 Base、Medium 或 Large。当前界面最大选项是 Medium，首次使用才会下载；Large 不在当前界面中。
+
+### 交给 ChatGPT Work / Codex 的安装指令
+
+下面是可以复制到 ChatGPT Work 或 Codex 的任务说明，不是 PowerShell 代码。它们需要能访问你的电脑、执行本机命令、联网和写入选定文件夹。纯云端环境的安装不会装进你的电脑；仅有网页操作能力也不等于有本机命令执行权限。ChatGPT Work 的本机访问要求见 [官方说明](https://learn.chatgpt.com/docs/get-started-with-work)。
+
+```text
+请帮我在这台 Windows x64 电脑安装并启动 VideoScript：
+https://github.com/poloveoh/VideoScript
+
+先确认你是否拥有本机命令执行、文件写入和联网能力；若没有，请明确告诉我缺少哪项能力，并提供 README 中的 PowerShell 安装方法，不要把云端安装说成本机安装。
+
+读取仓库 README.md 和 Install.ps1，在我选定的目录下载或复用完整项目。不要覆盖已有项目、data 中的个人文件或其他 Python 环境，也不要修改系统执行策略、获取浏览器 Cookie 或发布网站。
+
+在项目目录运行：
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
+
+让安装器准备 uv、便携 Node.js LTS、Python 3.12、全部锁定依赖、FFmpeg 和 Small 多语言模型。默认不要下载 Medium 或 Large。所需系统授权交由我处理。
+
+检查依赖和模型加载是否成功，再确认 http://127.0.0.1:8501/_stcore/health 返回 200 / ok。若无法访问本机服务，要说明未验证，不能只凭安装命令结束就声称界面可用。
+
+最后告诉我项目完整位置、界面地址，以及 Start.cmd / Stop.cmd 的使用方法。若安装失败，请报告失败步骤和具体错误，不要反复重试或关闭安全校验。
+```
+
+### 手动安装
+
 需要 Windows、Python 3.12 和 Node.js。克隆或下载源码后，在项目根目录打开 PowerShell：
 
 ```powershell
@@ -45,6 +100,10 @@ TXT 使用当前编辑文字；SRT 使用原始分段文字，两者明确分开
 字幕提取与 YouTube 音频下载需要联网，首次模型下载也需要联网。已有模型处理本地文件时不需要网络。语音不会发送给云端转录服务；应用仅监听本机地址，未发布网站。
 
 YouTube 可能限制请求，出现 403、429、登录或验证要求。工具不读取浏览器 Cookie，不自动绕过限制，也不保证所有视频都可下载。失败时可稍后重试，或使用你已有的本地文件。仅支持单个视频，不支持直播中的视频或整份播放列表。字幕失败后不会自动启动耗时的音频识别。
+
+**限流不是固定时段。** 429 可能与一段时间内的请求频率、出口 IP / 会话及所请求的字幕接口有关；部分自动翻译字幕也有已知 429 问题。暂停请求后可能恢复，但没有保证的等待分钟数或「晚上一定能用」规则。不要连续点击重试；可优先选原语言字幕，或使用已有本地音视频。当前工具没有实现自动限流冷却或重试队列。参考 [yt-dlp FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ) 和 [字幕 429 问题记录](https://github.com/yt-dlp/yt-dlp/issues/13831)。
+
+`WinError 10013` 则表示连接被本机权限 / 安全策略阻止，不等同于 YouTube 429；应检查运行环境的联网许可，不能只靠等待。通常建议从 Windows 双击 `Start.cmd` 启动，避免继承受限代理环境。
 
 ## 环境与维护
 
