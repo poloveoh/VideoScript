@@ -2,9 +2,7 @@
 
 个人学习用途的本地原型：提取 YouTube 已有字幕，或使用本地 Whisper 模型把视频 / 音频转成可编辑的文字稿，支持 TXT 和原始 SRT 导出。
 
-## 从 GitHub 安装
-
-### 下载 ZIP 后安装（Windows x64）
+## 安装（Windows x64）
 
 不需要预先安装 Python、Node.js 或 Git。按下面四步操作：
 
@@ -38,41 +36,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
 下载源为 Astral 官方 GitHub、nodejs.org、Python 包仓库及 Hugging Face 模型仓库。Node.js ZIP 会校验官方 SHA256。首次安装需要网络、足够磁盘空间和执行权限；学校 / 公司策略、网络限制或缺失的系统运行库可能使安装失败，脚本会报错停止。没有在所有 Windows 电脑上验证过。搬迁时请保留整个项目，并按上述步骤修复环境。
 
 可选参数：`-SkipModel` 暂不下载模型，`-NoLaunch` 安装后不打开工具。默认只准备 Small，不会预先下载 Base、Medium 或 Large。当前界面最大选项是 Medium，首次使用才会下载；Large 不在当前界面中。
-
-### 交给 ChatGPT Work / Codex 的安装指令
-
-下面是可以复制到 ChatGPT Work 或 Codex 的任务说明，不是 PowerShell 代码。它们需要能访问你的电脑、执行本机命令、联网和写入选定文件夹。纯云端环境的安装不会装进你的电脑；仅有网页操作能力也不等于有本机命令执行权限。ChatGPT Work 的本机访问要求见 [官方说明](https://learn.chatgpt.com/docs/get-started-with-work)。
-
-```text
-请帮我在这台 Windows x64 电脑安装并启动 VideoScript：
-https://github.com/poloveoh/VideoScript
-
-先确认你是否拥有本机命令执行、文件写入和联网能力；若没有，请明确告诉我缺少哪项能力，并提供 README 中的 PowerShell 安装方法，不要把云端安装说成本机安装。
-
-读取仓库 README.md 和 Install.ps1，在我选定的目录下载或复用完整项目。不要覆盖已有项目、data 中的个人文件或其他 Python 环境，也不要修改系统执行策略、获取浏览器 Cookie 或发布网站。
-
-在项目目录运行：
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
-
-让安装器准备 uv、便携 Node.js LTS、Python 3.12、全部锁定依赖、FFmpeg 和 Small 多语言模型。默认不要下载 Medium 或 Large。所需系统授权交由我处理。
-
-检查依赖和模型加载是否成功，再确认 http://127.0.0.1:8501/_stcore/health 返回 200 / ok。若无法访问本机服务，要说明未验证，不能只凭安装命令结束就声称界面可用。
-
-最后告诉我项目完整位置、界面地址，以及 Start.cmd / Stop.cmd 的使用方法。若安装失败，请报告失败步骤和具体错误，不要反复重试或关闭安全校验。
-```
-
-### 手动安装
-
-需要 Windows、Python 3.12 和 Node.js。克隆或下载源码后，在项目根目录打开 PowerShell：
-
-```powershell
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
-```
-
-安装完成后双击 `Start.cmd`。依赖包含 FFmpeg，无需单独安装。首次使用每种识别模型需要联网下载；GitHub 仓库不包含模型、个人文字稿、媒体文件或虚拟环境。
-
-项目通过 AI 辅助开发，目前是个人原型，不保证所有 YouTube 链接都能成功获取。暂不支持直接读取 Google Classroom / Google Drive 链接。
 
 ## 开始使用
 
@@ -111,26 +74,15 @@ YouTube 可能限制请求，出现 403、429、登录或验证要求。工具�
 
 ## 环境与维护
 
-此工作目录已经准备本地 Python 虚拟环境，依赖版本见 `requirements.lock.txt`。它引用同一工作目录下 `../../work/runtime/python/` 的 Python，请勿单独移动这个文件夹后仍期待原虚拟环境可用。
+运行环境保存在项目内的 `.tools/` 和 `.venv/`。FFmpeg、yt-dlp/EJS 和 Python 依赖由安装器统一准备，不需要逐项安装。依赖版本记录在 `requirements.lock.txt`。
 
-上述路径只适用于最初的本机安装；从 GitHub 安装时，使用本页开头的步骤重新创建虚拟环境，不依赖这个路径。
+安装、补齐依赖和搬迁修复均使用本页开头的同一条 `Install.ps1` 指令。旧 ZIP 不会自动更新；需要新版功能时，请先获取新版项目文件并保留自己的 `data/`。
 
-如果复制到其他电脑，安装 Python 3.12 和 Node.js 后，在此目录执行：
-
-```powershell
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
-```
-
-FFmpeg 由 imageio-ffmpeg 提供，不必单独安装。YouTube 的 JavaScript 检查使用现有 Node.js；yt-dlp 默认依赖包含 EJS 组件。
-
-若 YouTube 行为变化，可能需要更新 yt-dlp。更新属于联网维护，不在每次启动时自动执行：
+YouTube 行为变化时，可能需要单独更新 yt-dlp。在项目目录使用安装器附带的 uv：
 
 ```powershell
-.venv\Scripts\python.exe -m pip install --upgrade "yt-dlp[default]"
+.\.tools\uv\uv.exe pip install --python .\.venv\Scripts\python.exe --upgrade "yt-dlp[default]"
 ```
-
-当前虚拟环境由 uv 创建，没有预装 pip；此电脑可使用 `../../work/runtime/uv/uv.exe pip install --python .venv/Scripts/python.exe --upgrade "yt-dlp[default]"` 更新。
 
 ## 检查
 
@@ -138,6 +90,6 @@ FFmpeg 由 imageio-ffmpeg 提供，不必单独安装。YouTube 的 JavaScript �
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-测试依赖 pytest。首次在其他电脑安装测试工具：`python -m pip install pytest`（使用对应虚拟环境的 Python）。
+安装器的锁定依赖已包含测试工具 pytest。
 
-本工具不包含摘要、知识库、云同步或订阅计费。
+本项目通过 AI 辅助开发，目前是个人原型，暂不支持直接读取 Google Classroom / Google Drive 链接，也不包含摘要、知识库、云同步或订阅计费。
