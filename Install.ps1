@@ -74,7 +74,46 @@ Assert-Exit 'Node.js check'
 & $uv python install 3.12 --no-bin --no-registry
 Assert-Exit 'Python installation'
 $python = Join-Path $projectRoot '.venv/Scripts/python.exe'
-if (-not (Test-Path -LiteralPath $python)) {
+$venvRoot = Join-Path $projectRoot '.venv'
+$managedPython = & $uv python find 3.12 --managed-python
+Assert-Exit 'Managed Python discovery'
+$managedHome = Split-Path -Parent $managedPython
+$repairReason = ''
+if (Test-Path -LiteralPath $venvRoot) {
+    if ((Get-Item -LiteralPath $venvRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw 'The .venv folder is a link. Refusing to move a linked environment.'
+    }
+    try {
+        if (-not (Test-Path -LiteralPath $python)) { throw 'Python executable is missing.' }
+        $probe = & $python -c "import json,sys; print(json.dumps({'prefix':sys.prefix,'base':sys.base_prefix,'version':list(sys.version_info[:2])}))" 2>$null
+        if ($LASTEXITCODE -ne 0) { throw 'Python could not start.' }
+        $state = $probe | ConvertFrom-Json
+        if ([IO.Path]::GetFullPath($state.prefix) -ne [IO.Path]::GetFullPath($venvRoot) -or
+            [IO.Path]::GetFullPath($state.base) -ne [IO.Path]::GetFullPath($managedHome) -or
+            ($state.version -join '.') -ne '3.12') {
+            $repairReason = 'The environment points to a different Python installation or project location.'
+        }
+    } catch {
+        $repairReason = 'The existing Python environment is unavailable after relocation or is incomplete.'
+    }
+    if ($repairReason) {
+        # Only move this project's exact .venv child. Never delete user files or models.
+        $resolvedVenv = [IO.Path]::GetFullPath($venvRoot)
+        $expectedVenv = [IO.Path]::GetFullPath((Join-Path $projectRoot '.venv'))
+        if ($resolvedVenv -ne $expectedVenv -or (Split-Path -Parent $resolvedVenv) -ne [IO.Path]::GetFullPath($projectRoot)) {
+            throw 'Environment path validation failed.'
+        }
+        $running = Get-Process -Name python,pythonw -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.Path -and $_.Path.StartsWith($resolvedVenv + '\', [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+        }
+        if ($running) { throw 'Close this project first (Stop.cmd), then run Install.ps1 again.' }
+        $backup = Join-Path $projectRoot ('.venv.backup-' + [guid]::NewGuid().ToString('N'))
+        Write-Host "Repairing: $repairReason"
+        Move-Item -LiteralPath $resolvedVenv -Destination $backup
+        Write-Host "Previous environment preserved at $backup"
+    }
+}
+if (-not (Test-Path -LiteralPath $venvRoot)) {
     & $uv venv (Join-Path $projectRoot '.venv') --python 3.12 --managed-python
     Assert-Exit 'Virtual environment creation'
 }
