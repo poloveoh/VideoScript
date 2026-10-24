@@ -31,7 +31,21 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
 
 安装器下载 uv、便携版 Node.js LTS、Python 3.12、锁定的 Python 依赖（包括 Streamlit、yt-dlp/EJS、faster-whisper 和 FFmpeg），检查依赖，然后下载 Small 多语言模型并启动界面。运行环境保存在项目的 `.tools/` 和 `.venv/`，模型保存在 `data/models/`；不修改系统 PATH，不注册系统 Python，不要求 NVIDIA / CUDA，也不需要付费转录 API。
 
-下载源为 Astral 官方 GitHub、nodejs.org、Python 包仓库及 Hugging Face 模型仓库。Node.js ZIP 会校验官方 SHA256。首次安装需要网络、足够磁盘空间和执行权限；学校 / 公司策略、网络限制或缺失的系统运行库可能使安装失败，脚本会报错停止。没有在所有 Windows 电脑上验证过。安装后请保留 `.tools/`，单独移动 `.venv/` 会破坏路径。
+### 文件夹搬迁后，一行修复
+
+先停止工具，再移动或改名整个项目文件夹，保留 `.tools/`、`data/` 和其他项目文件。在新位置的文件夹地址栏输入 `powershell` 并按 Enter，然后执行相同的一行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install.ps1
+```
+
+新版安装器会实际运行 Python，检查版本、当前项目路径和基础解释器路径。若 `.venv` 失效或指向旧位置，会将其改名为 `.venv.backup-<随机编号>`，然后重建环境、重装依赖并启动工具；健康环境会直接复用。失败后可以再次运行同一行，继续准备依赖。
+
+模型和文字稿位于 `data/`，修复不会删除它们，也不会重新下载已经完整缓存的同一个模型。之前输入的本地媒体路径不会自动改写，外部文件搬迁后可能需要重新选择。旧环境备份会占用磁盘，确认工具正常后可以自行清理 `.venv.backup-*`，不要误删 `data/` 或 `.tools/`。
+
+修复仍可能需要联网；网络、磁盘空间、Windows 文件权限或运行中的进程可能使它失败。若工具还在运行，先双击 `Stop.cmd` 再修复。该功能只存在于新版 `Install.ps1`；以前下载的 ZIP 不会自动更新，请先获取新版脚本（或下载新版 ZIP，保留自己的 `data/`）。
+
+下载源为 Astral 官方 GitHub、nodejs.org、Python 包仓库及 Hugging Face 模型仓库。Node.js ZIP 会校验官方 SHA256。首次安装需要网络、足够磁盘空间和执行权限；学校 / 公司策略、网络限制或缺失的系统运行库可能使安装失败，脚本会报错停止。没有在所有 Windows 电脑上验证过。搬迁时请保留整个项目，并按上述步骤修复环境。
 
 可选参数：`-SkipModel` 暂不下载模型，`-NoLaunch` 安装后不打开工具。默认只准备 Small，不会预先下载 Base、Medium 或 Large。当前界面最大选项是 Medium，首次使用才会下载；Large 不在当前界面中。
 
