@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $env:PYTHONUTF8 = '1'
+$portableNode = Join-Path $PSScriptRoot '.tools\node'
+if (Test-Path -LiteralPath (Join-Path $portableNode 'node.exe')) {
+    $env:PATH = $portableNode + ';' + $env:PATH
+}
 $address = 'http://127.0.0.1:8501'
 $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 function Test-VideoScript {
