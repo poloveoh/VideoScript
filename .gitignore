@@ -1,5 +1,6 @@
 # Local Python environments and caches
 .venv/
+.venv.backup-*/
 .tools/
 venv/
 __pycache__/
