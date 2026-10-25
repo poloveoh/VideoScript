@@ -218,3 +218,169 @@ def test_resume_skips_segments_at_or_before_saved_checkpoint(tmp_path):
     assert [part['text'] for part in saved['segments']] == [
         'Already saved.', 'New words.',
     ]
+
+
+def _completed_job_with_managed_media(store):
+    job = store.create('Lecture', 'local', '')
+    media = store.directory(job['id']) / 'input.mp4'
+    media.write_bytes(b'temporary media')
+    job.update(
+        status='complete',
+        segments=[{'start': 0, 'end': 2, 'text': 'Finished transcript.'}],
+        media_path=str(media),
+        media_managed=True,
+        auto_cleanup_media=True,
+    )
+    store.save(job)
+    return job, media
+
+
+def test_cleanup_deletes_managed_media_only_after_verified_completion(tmp_path):
+    store = JobStore(tmp_path)
+    job, media = _completed_job_with_managed_media(store)
+
+    result = store.cleanup_media(job['id'])
+
+    assert not media.exists()
+    assert result['status'] == 'complete'
+    assert result['cleanup_status'] == 'complete'
+    assert result['cleanup_deleted_bytes'] == len(b'temporary media')
+    assert (store.directory(job['id']) / 'transcript.txt').read_text('utf-8') == (
+        'Finished transcript.'
+    )
+    assert (store.directory(job['id']) / 'original.srt').is_file()
+
+
+@pytest.mark.parametrize('status', ['paused', 'stopping', 'failed', 'running'])
+def test_cleanup_keeps_media_for_incomplete_jobs(tmp_path, status):
+    store = JobStore(tmp_path / status)
+    job, media = _completed_job_with_managed_media(store)
+    store.update_fields(job['id'], status=status)
+
+    result = store.cleanup_media(job['id'])
+
+    assert media.exists()
+    assert result['status'] == status
+    assert 'cleanup_status' not in result
+
+
+def test_cleanup_never_deletes_external_or_unowned_media(tmp_path):
+    store = JobStore(tmp_path / 'jobs')
+    external = tmp_path / 'original.mp4'
+    external.write_bytes(b'original')
+    job = store.create('Lecture', 'local', '')
+    job.update(
+        status='complete',
+        segments=[{'start': 0, 'end': 1, 'text': 'Done.'}],
+        media_path=str(external),
+        media_managed=False,
+        auto_cleanup_media=True,
+    )
+    store.save(job)
+
+    result = store.cleanup_media(job['id'])
+
+    assert external.exists()
+    assert result['cleanup_status'] == 'not_managed'
+
+
+def test_cleanup_is_disabled_safely_for_existing_jobs(tmp_path):
+    store = JobStore(tmp_path)
+    job = store.create('Legacy', 'local', '')
+    media = store.directory(job['id']) / 'input.mp4'
+    media.write_bytes(b'legacy media')
+    job.update(
+        status='complete',
+        segments=[{'start': 0, 'end': 1, 'text': 'Legacy transcript.'}],
+        media_path=str(media),
+    )
+    store.save(job)
+
+    result = store.cleanup_media(job['id'])
+
+    assert media.exists()
+    assert result['cleanup_status'] == 'disabled'
+
+
+def test_cleanup_rejects_managed_path_outside_job_directory(tmp_path):
+    store = JobStore(tmp_path / 'jobs')
+    external = tmp_path / 'outside.mp4'
+    external.write_bytes(b'original')
+    job = store.create('Lecture', 'local', '')
+    job.update(
+        status='complete',
+        segments=[{'start': 0, 'end': 1, 'text': 'Done.'}],
+        media_path=str(external),
+        media_managed=True,
+        auto_cleanup_media=True,
+    )
+    store.save(job)
+
+    result = store.cleanup_media(job['id'])
+
+    assert external.exists()
+    assert result['cleanup_status'] == 'failed'
+    assert '任务目录' in result['cleanup_error']
+
+
+def test_cleanup_keeps_media_when_persisted_transcript_is_not_verified(tmp_path):
+    store = JobStore(tmp_path)
+    job, media = _completed_job_with_managed_media(store)
+    (store.directory(job['id']) / 'transcript.txt').write_text(
+        'truncated', encoding='utf-8',
+    )
+
+    result = store.cleanup_media(job['id'])
+
+    assert media.exists()
+    assert result['status'] == 'complete'
+    assert result['cleanup_status'] == 'failed'
+    assert '文字稿' in result['cleanup_error']
+    assert (store.directory(job['id']) / 'transcript.txt').read_text('utf-8') == (
+        'truncated'
+    )
+
+
+def test_cleanup_rejects_symbolic_media_link_without_unlinking(
+        tmp_path, monkeypatch):
+    store = JobStore(tmp_path)
+    job, media = _completed_job_with_managed_media(store)
+    original_is_symlink = Path.is_symlink
+
+    def identify_media_as_symlink(path):
+        if path == media:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, 'is_symlink', identify_media_as_symlink)
+
+    result = store.cleanup_media(job['id'])
+
+    assert media.exists()
+    assert result['cleanup_status'] == 'failed'
+    assert '符号链接' in result['cleanup_error']
+
+
+def test_cleanup_failure_can_be_retried_without_transcription(
+        tmp_path, monkeypatch):
+    store = JobStore(tmp_path)
+    job, media = _completed_job_with_managed_media(store)
+    original_unlink = Path.unlink
+
+    def fail_media_unlink(path, *args, **kwargs):
+        if path == media:
+            raise PermissionError('file is busy')
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as active:
+        active.setattr(Path, 'unlink', fail_media_unlink)
+        failed = store.cleanup_media(job['id'])
+
+    assert media.exists()
+    assert failed['status'] == 'complete'
+    assert failed['cleanup_status'] == 'failed'
+    assert 'file is busy' in failed['cleanup_error']
+
+    retried = store.cleanup_media(job['id'])
+    assert not media.exists()
+    assert retried['cleanup_status'] == 'complete'

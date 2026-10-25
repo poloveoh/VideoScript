@@ -38,7 +38,7 @@ with st.sidebar:
     st.caption('音视频和文字稿保存在本机。YouTube 与首次模型下载需要网络。')
     with st.expander('文件保存在哪里？'):
         st.code(str(DATA), language=None)
-        st.caption('每个任务保存原始字幕 / 媒体、文字稿与 SRT。文件不会自动删除；长视频会占用磁盘空间。')
+        st.caption('文字稿与 SRT 会永久保留；任务内的临时媒体在成功后可自动清理。外部原始文件不会被删除。')
 
 st.markdown('<div class="eyebrow">WATCH LESS. READ MORE.</div>', unsafe_allow_html=True)
 st.title('VideoScript')
@@ -115,6 +115,11 @@ if media is not None or source == '本地视频 / 音频':
         language = st.selectbox('主要语音语言', list(languages))
     glossary = st.text_input('专业词汇 / 人名（可选）', placeholder='例如：photosynthesis, mitochondria, ATP')
     st.caption('保留原语言，不翻译。混合语言请先尝试自动检测；识别质量仍需人工检查。')
+    auto_cleanup_media = st.checkbox(
+        '成功转录后自动删除临时媒体', value=True,
+        key='auto_cleanup_media',
+        help='只删除任务目录中的上传副本或 YouTube 下载音频；不会删除通过完整路径读取的原始文件。',
+    )
     if st.button('开始本地转录', type='primary', disabled=media is None):
         title = info.get('title', 'YouTube 视频') if isinstance(media, str) else media.name
         job = store.create(title, 'youtube' if isinstance(media, str) else 'local',
@@ -135,6 +140,8 @@ if media is not None or source == '本地视频 / 音频':
                 model=model,
                 language=languages[language],
                 glossary=glossary,
+                auto_cleanup_media=auto_cleanup_media,
+                media_managed=not isinstance(media, Path),
                 progress=0.0,
                 message='任务已提交，正在启动…',
             )
@@ -204,6 +211,13 @@ else:
             if st.button('继续转录', key='resume_job', disabled=not resumable):
                 worker.launch_worker(job_id, store)
                 st.success('任务已重新启动。')
+                st.rerun()
+        elif status == 'complete' and current.get('cleanup_status') == 'failed':
+            st.warning(f"临时媒体清理失败：{current.get('cleanup_error', '未知错误')}")
+            if st.button('重试清理临时媒体', key='retry_cleanup'):
+                cleaned = store.cleanup_media(job_id)
+                if cleaned.get('cleanup_status') == 'complete':
+                    st.success('临时媒体已清理。')
                 st.rerun()
 
     job_controls(job['id'])

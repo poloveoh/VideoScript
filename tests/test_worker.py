@@ -64,6 +64,7 @@ def test_worker_honors_existing_stop_without_starting_transcription(
     run_job(job['id'], store=store, lock_path=tmp_path / 'worker.lock')
 
     assert store.load(job['id'])['status'] == 'paused'
+    assert media.exists()
 
 
 def test_rejected_duplicate_worker_does_not_pause_active_job(tmp_path):
@@ -122,3 +123,88 @@ def test_launch_worker_does_not_open_a_console_window(tmp_path, monkeypatch):
 
     assert captured['creationflags'] & subprocess.CREATE_NO_WINDOW
     assert not captured['creationflags'] & subprocess.DETACHED_PROCESS
+
+
+def test_worker_cleans_managed_media_after_success(tmp_path, monkeypatch):
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Lecture', 'local', '')
+    media = store.directory(job['id']) / 'input.wav'
+    media.write_bytes(b'audio')
+    job.update(
+        media_path=str(media), media_managed=True, auto_cleanup_media=True,
+        model='small', language='ms', glossary='',
+    )
+    store.save(job)
+
+    def fake_transcribe(path, size, language, glossary, used_store, active, report):
+        return process_transcription(used_store, active, iter([
+            {'start': 0, 'end': 2, 'text': 'Complete.'},
+        ]), 2, report)
+
+    monkeypatch.setattr('worker.transcribe', fake_transcribe)
+
+    result = run_job(
+        job['id'], store=store, lock_path=tmp_path / 'worker.lock',
+    )
+
+    assert result['status'] == 'complete'
+    assert result['cleanup_status'] == 'complete'
+    assert not media.exists()
+
+
+def test_worker_failure_keeps_managed_media(tmp_path, monkeypatch):
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Lecture', 'local', '')
+    media = store.directory(job['id']) / 'input.wav'
+    media.write_bytes(b'audio')
+    job.update(
+        media_path=str(media), media_managed=True, auto_cleanup_media=True,
+        model='small', language='ms', glossary='',
+    )
+    store.save(job)
+
+    def fail_transcription(*_args, **_kwargs):
+        raise RuntimeError('recognition failed')
+
+    monkeypatch.setattr('worker.transcribe', fail_transcription)
+
+    result = run_job(
+        job['id'], store=store, lock_path=tmp_path / 'worker.lock',
+    )
+
+    assert result['status'] == 'failed'
+    assert media.exists()
+    assert 'cleanup_status' not in result
+
+
+def test_unexpected_cleanup_error_does_not_fail_completed_transcription(
+        tmp_path, monkeypatch):
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Lecture', 'local', '')
+    media = store.directory(job['id']) / 'input.wav'
+    media.write_bytes(b'audio')
+    job.update(
+        media_path=str(media), media_managed=True, auto_cleanup_media=True,
+        model='small', language='ms', glossary='',
+    )
+    store.save(job)
+
+    def fake_transcribe(path, size, language, glossary, used_store, active, report):
+        return process_transcription(used_store, active, iter([
+            {'start': 0, 'end': 2, 'text': 'Complete.'},
+        ]), 2, report)
+
+    monkeypatch.setattr('worker.transcribe', fake_transcribe)
+    monkeypatch.setattr(
+        store, 'cleanup_media',
+        lambda _job_id: (_ for _ in ()).throw(OSError('cleanup unavailable')),
+    )
+
+    result = run_job(
+        job['id'], store=store, lock_path=tmp_path / 'worker.lock',
+    )
+
+    assert result['status'] == 'complete'
+    assert result['cleanup_status'] == 'failed'
+    assert 'cleanup unavailable' in result['cleanup_error']
+    assert media.exists()

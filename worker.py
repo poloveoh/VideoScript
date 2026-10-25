@@ -178,7 +178,19 @@ def run_job(job_id, store=None, lock_path=DATA / 'transcription.lock'):
             )
             result.pop('worker_pid', None)
             store.save(result)
-            return result
+            try:
+                return store.cleanup_media(job_id)
+            except Exception as cleanup_exc:
+                result.update(
+                    cleanup_status='failed',
+                    cleanup_error=str(cleanup_exc),
+                    cleanup_at=time.time(),
+                )
+                try:
+                    store.save(result)
+                except Exception:
+                    pass
+                return result
     except WorkerBusy as exc:
         return store.load(job_id)
     except Exception as exc:

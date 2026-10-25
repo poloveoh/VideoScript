@@ -96,14 +96,23 @@ class JobStore:
     def _write(self, job):
         folder = self.directory(job['id'])
         folder.mkdir(parents=True, exist_ok=True)
+        self._write_job_json(job)
         for name, content in [
-            ('job.json', json.dumps(job, ensure_ascii=False, indent=2)),
             ('transcript.txt', job.get('edited_text') if job.get('edited_text') is not None else plain_text(job['segments'])),
             ('original.srt', to_srt(job['segments'])),
         ]:
             temp = folder / (name + '.tmp')
             temp.write_text(content, encoding='utf-8')
             temp.replace(folder / name)
+
+    def _write_job_json(self, job):
+        folder = self.directory(job['id'])
+        folder.mkdir(parents=True, exist_ok=True)
+        temp = folder / 'job.json.tmp'
+        temp.write_text(
+            json.dumps(job, ensure_ascii=False, indent=2), encoding='utf-8',
+        )
+        temp.replace(folder / 'job.json')
 
     def load(self, job_id):
         folder = self.directory(job_id)
@@ -134,6 +143,60 @@ class JobStore:
 
     def stop_requested(self, job_id):
         return (self.directory(job_id) / 'stop.requested').is_file()
+
+    def cleanup_media(self, job_id):
+        """Delete one verified, VideoScript-managed media file after success."""
+        with STORE_LOCK:
+            folder = self.directory(job_id)
+            with _file_lock(folder / '.job.lock'):
+                job = json.loads((folder / 'job.json').read_text('utf-8'))
+                if job.get('status') != 'complete':
+                    return job
+                if job.get('cleanup_status') == 'complete':
+                    return job
+
+                def finish(status, error='', deleted_bytes=0):
+                    job.update(
+                        cleanup_status=status,
+                        cleanup_error=error,
+                        cleanup_at=time.time(),
+                        cleanup_deleted_bytes=deleted_bytes,
+                    )
+                    self._write_job_json(job)
+                    return job
+
+                if not job.get('auto_cleanup_media', False):
+                    return finish('disabled')
+                if not job.get('media_managed', False):
+                    return finish('not_managed')
+
+                try:
+                    if not job.get('segments'):
+                        raise ValueError('完成的任务没有可验证的文字分段。')
+                    expected_text = (
+                        job.get('edited_text')
+                        if job.get('edited_text') is not None
+                        else plain_text(job['segments'])
+                    )
+                    if (folder / 'transcript.txt').read_text('utf-8') != expected_text:
+                        raise ValueError('文字稿未通过完整性验证。')
+                    if (folder / 'original.srt').read_text('utf-8') != to_srt(job['segments']):
+                        raise ValueError('字幕文件未通过完整性验证。')
+
+                    media_path = Path(job.get('media_path', ''))
+                    if media_path.is_symlink():
+                        raise ValueError('媒体文件是符号链接，已拒绝清理。')
+                    media = media_path.resolve()
+                    resolved_folder = folder.resolve()
+                    if media.parent != resolved_folder:
+                        raise ValueError('媒体文件不在当前任务目录内，已拒绝清理。')
+                    if not media.name.startswith(('input.', 'audio.')):
+                        raise ValueError('媒体文件不是可识别的临时文件，已拒绝清理。')
+                    deleted_bytes = media.stat().st_size if media.is_file() else 0
+                    media.unlink(missing_ok=True)
+                    return finish('complete', deleted_bytes=deleted_bytes)
+                except Exception as exc:
+                    return finish('failed', str(exc))
 
 
 def _options():

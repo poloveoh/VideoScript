@@ -20,6 +20,8 @@ def test_local_mode_explains_first_model_download():
     app.radio(key='source').set_value('本地视频 / 音频').run()
     assert not app.exception
     assert any('首次' in item.value for item in app.info)
+    assert app.checkbox(key='auto_cleanup_media').value is True
+    assert any('成功后可自动清理' in item.value for item in app.caption)
 
 
 def test_running_job_can_be_stopped_and_offers_resume_without_calling_whisper(
@@ -122,3 +124,40 @@ def test_stopping_job_does_not_offer_another_stop(monkeypatch):
     assert not app.exception
     assert not any(button.key == 'stop_job' for button in app.button)
     assert not any(button.key == 'resume_job' for button in app.button)
+
+
+def test_completed_job_can_retry_cleanup_without_transcription(monkeypatch):
+    import pipeline
+
+    job = {
+        'id': 'd' * 32, 'title': 'Complete', 'source': 'local', 'url': '',
+        'created': 1, 'status': 'complete', 'segments': [
+            {'start': 0, 'end': 2, 'text': 'Saved transcript.'},
+        ], 'error': '', 'edited_text': None, 'media_path': __file__,
+        'progress': 1.0, 'message': '完成', 'worker_pid': None,
+        'cleanup_status': 'failed', 'cleanup_error': 'file is busy',
+    }
+
+    class FakeStore:
+        def list(self):
+            return [job]
+
+        def load(self, _job_id):
+            return dict(job)
+
+        def cleanup_media(self, _job_id):
+            job.update(cleanup_status='complete', cleanup_error='')
+            return dict(job)
+
+        def save_edits(self, _job_id, text):
+            job['edited_text'] = text
+
+    monkeypatch.setattr(pipeline, 'JobStore', FakeStore)
+    app = AppTest.from_file(str(APP))
+    app.session_state['active_job'] = job['id']
+    app.run(timeout=20)
+
+    assert not app.exception
+    app.button(key='retry_cleanup').click().run()
+    assert not app.exception
+    assert job['cleanup_status'] == 'complete'
