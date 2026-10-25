@@ -63,6 +63,16 @@ def plain_text(segments: list[dict]) -> str:
     return '\n\n'.join(paragraphs)
 
 
+def readable_legacy_text(value):
+    """Repair UTF-8 text that an older Windows run decoded as CP1252."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return value.encode('cp1252').decode('utf-8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+
+
 def timestamp(seconds: float, srt: bool = False) -> str:
     millis = max(0, round(seconds * 1000))
     seconds, ms = divmod(millis, 1000)
