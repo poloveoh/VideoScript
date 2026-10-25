@@ -1,11 +1,12 @@
 from pathlib import Path
-import time
 
 import streamlit as st
 
-from core import canonical_youtube_url, plain_text, timestamp, to_srt
-from pipeline import (DATA, JobStore, download_audio, extract_captions,
-                      inspect_youtube, subtitle_choices, transcribe)
+from core import (canonical_youtube_url, plain_text, readable_legacy_text,
+                  timestamp, to_srt)
+from pipeline import (DATA, JobStore, extract_captions, inspect_youtube,
+                      subtitle_choices)
+import worker
 
 st.set_page_config(page_title='VideoScript · 视频转文字', page_icon='✍️', layout='wide')
 st.markdown('''<style>
@@ -119,12 +120,9 @@ if media is not None or source == '本地视频 / 音频':
         job = store.create(title, 'youtube' if isinstance(media, str) else 'local',
                            st.session_state.video_url if isinstance(media, str) else '')
         st.session_state.active_job = job['id']
-        progress = st.progress(0.0, text='正在准备…')
-        report = lambda value, message: progress.progress(max(0., min(1., float(value))), text=message)
-        started = time.monotonic()
         try:
             if isinstance(media, str):
-                path = download_audio(st.session_state.video_url, store.directory(job['id']), report)
+                path = None
             elif isinstance(media, Path):
                 path = media
             else:
@@ -132,11 +130,16 @@ if media is not None or source == '本地视频 / 音频':
                 with path.open('wb') as target:
                     for offset in range(0, media.size, 1024 * 1024):
                         target.write(media.getbuffer()[offset:offset + 1024 * 1024])
-            job['media_path'] = str(path)
+            job.update(
+                media_path=str(path) if path else '',
+                model=model,
+                language=languages[language],
+                glossary=glossary,
+                progress=0.0,
+                message='任务已提交，正在启动…',
+            )
             store.save(job)
-            transcribe(path, model, languages[language], glossary, store, job, report)
-            job['elapsed'] = round(time.monotonic() - started, 1)
-            store.save(job)
+            worker.launch_worker(job['id'], store)
             st.rerun()
         except Exception as exc:
             job.update(status='failed', error=str(exc))
@@ -155,9 +158,57 @@ else:
         st.error('无法读取保存的任务。请从左侧选择其他记录。')
         st.stop()
     st.subheader(job['title'])
-    st.caption(f"{job.get('method', '未完成')} · {job.get('language', '语言待检测')} · {len(job['segments'])} 个文字片段")
+    st.caption(f"{readable_legacy_text(job.get('method', '未完成'))} · {job.get('language', '语言待检测')} · {len(job['segments'])} 个文字片段")
+
+    @st.fragment(run_every=2)
+    def job_controls(job_id):
+        current = store.load(job_id)
+        status = current.get('status', 'failed')
+        active_worker = worker.process_is_running(current.get('worker_pid'))
+        active_status = status in {'queued', 'running', 'stopping'}
+        if active_status and not active_worker:
+            current = store.update_fields(
+                job_id, status='paused', worker_pid=None,
+                message='后台转录进程已退出，可以从已保存位置继续。',
+            )
+            status = 'paused'
+            active_status = False
+        names = {
+            'queued': '排队中', 'running': '转录中', 'stopping': '停止中',
+            'paused': '已暂停', 'complete': '已完成', 'failed': '失败',
+        }
+        progress = max(0.0, min(1.0, float(current.get('progress', 0))))
+        st.progress(progress, text=current.get('message') or names.get(status, status))
+        st.caption(
+            f"状态：{names.get(status, status)} · "
+            f"已保存 {len(current.get('segments', []))} 个文字片段"
+        )
+        state_key = f"worker_status_{job_id}"
+        previous = st.session_state.get(state_key)
+        st.session_state[state_key] = status
+        if (
+            previous in {'queued', 'running', 'stopping'}
+            and status in {'paused', 'complete', 'failed'}
+        ):
+            st.rerun()
+        if status in {'queued', 'running'} and active_worker:
+            if st.button('停止转录', key='stop_job', type='secondary'):
+                with st.spinner('正在安全停止，最多等待 5 秒…'):
+                    worker.stop_worker(job_id, store, timeout=5)
+                st.rerun()
+        elif status in {'paused', 'failed'}:
+            resumable = (
+                current.get('source') == 'youtube'
+                or Path(current.get('media_path', '')).is_file()
+            )
+            if st.button('继续转录', key='resume_job', disabled=not resumable):
+                worker.launch_worker(job_id, store)
+                st.success('任务已重新启动。')
+                st.rerun()
+
+    job_controls(job['id'])
     if job['status'] != 'complete':
-        st.warning('这是一份未完成的文字稿。若任务已中断，可以导出已保存部分；第一版不会自动续传或续跑。')
+        st.warning('这是一份未完成的文字稿。已保存部分可以导出，也可以停止后继续转录。')
         if job.get('error'):
             with st.expander('查看失败原因'):
                 st.write(job['error'])

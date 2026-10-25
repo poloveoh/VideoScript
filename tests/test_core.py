@@ -1,6 +1,7 @@
 import pytest
 
-from core import canonical_youtube_url, parse_json3, plain_text, to_srt
+from core import (canonical_youtube_url, parse_json3, plain_text,
+                  readable_legacy_text, to_srt)
 
 
 @pytest.mark.parametrize('url', [
@@ -48,3 +49,12 @@ def test_exports_preserve_words_and_srt_milliseconds():
     assert plain_text(segments) == '你好 world.\n\nNext passage.'
     assert to_srt(segments) == ('1\n00:00:01,250 --> 00:00:03,750\n你好 world.\n\n'
                                 '2\n00:01:10,000 --> 00:01:12,005\nNext passage.\n')
+
+
+def test_repairs_legacy_mojibake_without_changing_valid_chinese():
+    assert readable_legacy_text('æœ¬åœ° Whisper small / CPU int8') == (
+        '本地 Whisper small / CPU int8'
+    )
+    assert readable_legacy_text('本地 Whisper small / CPU int8') == (
+        '本地 Whisper small / CPU int8'
+    )
