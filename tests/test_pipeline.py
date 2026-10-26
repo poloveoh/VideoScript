@@ -24,12 +24,44 @@ def test_history_recovers_partial_output_without_claiming_complete(tmp_path):
     recovered = JobStore(tmp_path).list()[0]
     assert recovered['segments'][0]['text'] == 'A useful idea.'
     assert recovered['status'] == 'running'
-    assert (tmp_path / job['id'] / 'transcript.txt').read_text('utf-8') == 'A useful idea.'
+    assert (tmp_path / job['id'] / 'Lecture.txt').read_text('utf-8') == 'A useful idea.'
 
 
 def test_store_rejects_path_traversal(tmp_path):
     with pytest.raises(ValueError):
         JobStore(tmp_path).load('../outside')
+
+
+def test_title_named_outputs_preserve_edits_and_separate_duplicate_titles(tmp_path):
+    store = JobStore(tmp_path)
+    first = store.create('影片标题.mp4', 'local', '')
+    second = store.create('影片标题.mp4', 'local', '')
+    store.save_edits(first['id'], '修改后的文字。')
+    assert (store.directory(first['id']) / '影片标题.txt').read_text('utf-8') == '修改后的文字。'
+    assert (store.directory(first['id']) / '影片标题.srt').is_file()
+    assert (store.directory(second['id']) / '影片标题.txt').read_text('utf-8') == ''
+    assert not (store.directory(first['id']) / 'transcript.txt').exists()
+
+
+def test_legacy_output_names_remain_editable_and_allow_verified_cleanup(tmp_path):
+    store = JobStore(tmp_path)
+    folder = store.directory('a' * 32)
+    folder.mkdir()
+    media = folder / 'input.mp4'
+    media.write_bytes(b'media')
+    legacy = {
+        'id': 'a' * 32, 'title': '旧影片', 'source': 'local', 'url': '',
+        'created': 1, 'status': 'complete', 'edited_text': None,
+        'segments': [{'start': 0, 'end': 1, 'text': '原文'}],
+        'media_path': str(media), 'media_managed': True, 'auto_cleanup_media': True,
+    }
+    (folder / 'job.json').write_text(json.dumps(legacy), encoding='utf-8')
+    (folder / 'transcript.txt').write_text('原文', encoding='utf-8')
+    (folder / 'original.srt').write_text('', encoding='utf-8')
+    store.save_edits(legacy['id'], '校对文字')
+    assert (folder / 'transcript.txt').read_text('utf-8') == '校对文字'
+    assert store.cleanup_media(legacy['id'])['cleanup_status'] == 'complete'
+    assert not media.exists()
 
 
 def test_subtitle_choices_distinguish_manual_and_auto():
@@ -245,10 +277,10 @@ def test_cleanup_deletes_managed_media_only_after_verified_completion(tmp_path):
     assert result['status'] == 'complete'
     assert result['cleanup_status'] == 'complete'
     assert result['cleanup_deleted_bytes'] == len(b'temporary media')
-    assert (store.directory(job['id']) / 'transcript.txt').read_text('utf-8') == (
+    assert (store.directory(job['id']) / 'Lecture.txt').read_text('utf-8') == (
         'Finished transcript.'
     )
-    assert (store.directory(job['id']) / 'original.srt').is_file()
+    assert (store.directory(job['id']) / 'Lecture.srt').is_file()
 
 
 @pytest.mark.parametrize('status', ['paused', 'stopping', 'failed', 'running'])
@@ -326,7 +358,7 @@ def test_cleanup_rejects_managed_path_outside_job_directory(tmp_path):
 def test_cleanup_keeps_media_when_persisted_transcript_is_not_verified(tmp_path):
     store = JobStore(tmp_path)
     job, media = _completed_job_with_managed_media(store)
-    (store.directory(job['id']) / 'transcript.txt').write_text(
+    (store.directory(job['id']) / 'Lecture.txt').write_text(
         'truncated', encoding='utf-8',
     )
 
@@ -336,7 +368,7 @@ def test_cleanup_keeps_media_when_persisted_transcript_is_not_verified(tmp_path)
     assert result['status'] == 'complete'
     assert result['cleanup_status'] == 'failed'
     assert '文字稿' in result['cleanup_error']
-    assert (store.directory(job['id']) / 'transcript.txt').read_text('utf-8') == (
+    assert (store.directory(job['id']) / 'Lecture.txt').read_text('utf-8') == (
         'truncated'
     )
 

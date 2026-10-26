@@ -2,7 +2,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from core import (canonical_youtube_url, plain_text, readable_legacy_text,
+from core import (canonical_youtube_url, output_filename_stem, plain_text, readable_legacy_text,
                   timestamp, to_srt)
 from pipeline import (DATA, JobStore, extract_captions, inspect_youtube,
                       subtitle_choices)
@@ -227,6 +227,7 @@ else:
             with st.expander('查看失败原因'):
                 st.write(job['error'])
     if job['segments']:
+        download_stem = output_filename_stem(job['title'])
         tab_read, tab_time = st.tabs(['阅读与编辑', '时间戳与原始字幕'])
         with tab_read:
             edited = st.text_area('文字稿', value=job.get('edited_text') if job.get('edited_text') is not None else plain_text(job['segments']),
@@ -237,9 +238,9 @@ else:
                     store.save_edits(job['id'], edited)
                     st.success('修改已保存到本机。')
             with b:
-                st.download_button('下载文字稿 .txt', edited, file_name='transcript.txt', mime='text/plain; charset=utf-8', width='stretch')
+                st.download_button('下载文字稿 .txt', edited, file_name=download_stem + '.txt', mime='text/plain; charset=utf-8', width='stretch')
             with c:
-                st.download_button('下载原始字幕 .srt', to_srt(job['segments']), file_name='original.srt', mime='application/x-subrip', width='stretch')
+                st.download_button('下载原始字幕 .srt', to_srt(job['segments']), file_name=download_stem + '.srt', mime='application/x-subrip', width='stretch')
             st.caption('TXT 包含当前编辑内容。SRT 保留原始识别文字与时间戳，不包含阅读区的修改。')
         with tab_time:
             st.dataframe([{'开始': timestamp(s['start']), '结束': timestamp(s['end']), '文字': s['text']}

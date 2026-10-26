@@ -4,6 +4,24 @@ from core import (canonical_youtube_url, parse_json3, plain_text,
                   readable_legacy_text, to_srt)
 
 
+@pytest.mark.parametrize('title, expected', [
+    ('影片标题', '影片标题'),
+    ('Lecture.mp4', 'Lecture'),
+    ('../影片: "标题"?* ', '_影片_ _标题___'),
+    ('CON', '_CON'),
+    ('CONIN$', '_CONIN$'),
+    ('CONOUT$', '_CONOUT$'),
+    ('CON .foo', '_CON .foo'),
+    ('COM1 .test', '_COM1 .test'),
+    ('NUL.txt', '_NUL.txt'),
+    (' ... ', 'transcript'),
+    ('a' * 200, 'a' * 80),
+])
+def test_output_filename_stem_is_readable_and_windows_safe(title, expected):
+    from core import output_filename_stem
+    assert output_filename_stem(title) == expected
+
+
 @pytest.mark.parametrize('url', [
     'https://www.youtube.com/watch?v=BaW_jenozKc&list=abc',
     'https://youtu.be/BaW_jenozKc?t=10',
