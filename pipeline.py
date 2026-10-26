@@ -10,7 +10,8 @@ import threading
 import time
 import uuid
 
-from core import canonical_youtube_url, parse_json3, plain_text, to_srt
+from core import (canonical_youtube_url, output_filename_stem, parse_json3,
+                  plain_text, to_srt)
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data'
@@ -18,6 +19,14 @@ os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 os.environ.setdefault('HF_HOME', str(DATA / 'models' / 'hub'))
 MODEL_LOCK = threading.Lock()
 STORE_LOCK = threading.RLock()
+
+
+def output_filenames(job):
+    """Old jobs keep their existing files; new jobs use the video title."""
+    if job.get('output_naming') == 'title':
+        stem = output_filename_stem(job['title'])
+        return stem + '.txt', stem + '.srt'
+    return 'transcript.txt', 'original.srt'
 
 
 @contextmanager
@@ -62,7 +71,8 @@ class JobStore:
     def create(self, title, source, url):
         job = {'id': uuid.uuid4().hex, 'title': title, 'source': source,
                'url': url, 'created': time.time(), 'status': 'running',
-               'segments': [], 'error': '', 'edited_text': None}
+               'segments': [], 'error': '', 'edited_text': None,
+               'output_naming': 'title'}
         self.save(job)
         return job
 
@@ -97,9 +107,10 @@ class JobStore:
         folder = self.directory(job['id'])
         folder.mkdir(parents=True, exist_ok=True)
         self._write_job_json(job)
+        text_name, subtitle_name = output_filenames(job)
         for name, content in [
-            ('transcript.txt', job.get('edited_text') if job.get('edited_text') is not None else plain_text(job['segments'])),
-            ('original.srt', to_srt(job['segments'])),
+            (text_name, job.get('edited_text') if job.get('edited_text') is not None else plain_text(job['segments'])),
+            (subtitle_name, to_srt(job['segments'])),
         ]:
             temp = folder / (name + '.tmp')
             temp.write_text(content, encoding='utf-8')
@@ -178,9 +189,10 @@ class JobStore:
                         if job.get('edited_text') is not None
                         else plain_text(job['segments'])
                     )
-                    if (folder / 'transcript.txt').read_text('utf-8') != expected_text:
+                    text_name, subtitle_name = output_filenames(job)
+                    if (folder / text_name).read_text('utf-8') != expected_text:
                         raise ValueError('文字稿未通过完整性验证。')
-                    if (folder / 'original.srt').read_text('utf-8') != to_srt(job['segments']):
+                    if (folder / subtitle_name).read_text('utf-8') != to_srt(job['segments']):
                         raise ValueError('字幕文件未通过完整性验证。')
 
                     media_path = Path(job.get('media_path', ''))
