@@ -4,6 +4,23 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 
+def output_filename_stem(title: str) -> str:
+    """Keep video titles readable while producing a Windows-safe basename."""
+    title = re.sub(
+        r'\.(mp4|mkv|mov|avi|webm|m4v|mp3|wav|m4a|aac|flac|ogg)$',
+        '', title.strip(), flags=re.IGNORECASE,
+    )
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title).strip(' .')
+    # Bound UTF-16 length too, since Windows counts emoji as two code units.
+    stem = stem.encode('utf-16-le')[:160].decode('utf-16-le', errors='ignore').rstrip(' .')
+    if not stem:
+        return 'transcript'
+    if re.fullmatch(r'CON|CONIN\$|CONOUT\$|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]',
+                    stem.split('.')[0].rstrip(), flags=re.IGNORECASE):
+        stem = '_' + stem
+    return stem
+
+
 def canonical_youtube_url(value: str) -> str:
     parsed = urlparse(value.strip())
     host = (parsed.hostname or '').lower()
