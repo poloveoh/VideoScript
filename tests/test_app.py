@@ -128,6 +128,16 @@ def test_stopping_job_does_not_offer_another_stop(monkeypatch):
 
 def test_completed_job_can_retry_cleanup_without_transcription(monkeypatch):
     import pipeline
+    import streamlit as st
+
+    download_names = []
+    original_download_button = st.download_button
+
+    def capture_download(*args, **kwargs):
+        download_names.append(kwargs['file_name'])
+        return original_download_button(*args, **kwargs)
+
+    monkeypatch.setattr(st, 'download_button', capture_download)
 
     job = {
         'id': 'd' * 32, 'title': 'Complete', 'source': 'local', 'url': '',
@@ -158,6 +168,7 @@ def test_completed_job_can_retry_cleanup_without_transcription(monkeypatch):
     app.run(timeout=20)
 
     assert not app.exception
+    assert download_names == ['Complete.txt', 'Complete.srt']
     app.button(key='retry_cleanup').click().run()
     assert not app.exception
     assert job['cleanup_status'] == 'complete'
