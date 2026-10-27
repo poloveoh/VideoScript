@@ -30,4 +30,6 @@
 
 ## Commit
 
-Pending final commit hash.
+Implementation commit: `d25ca6074d2d221124cfc3b01ebe8ccac51033e3` (`feat: discover youtube playlists`).
+
+Test assertion correction and final verification report commit: `e5b3b146dc9587e1e1144883176c72d50d5c5a54` (`docs: record playlist discovery verification`).
