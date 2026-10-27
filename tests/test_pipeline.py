@@ -24,12 +24,143 @@ def test_history_recovers_partial_output_without_claiming_complete(tmp_path):
     recovered = JobStore(tmp_path).list()[0]
     assert recovered['segments'][0]['text'] == 'A useful idea.'
     assert recovered['status'] == 'running'
-    assert (tmp_path / job['id'] / 'Lecture.txt').read_text('utf-8') == 'A useful idea.'
+    assert (store.directory(job['id']) / 'Lecture.txt').read_text('utf-8') == 'A useful idea.'
 
 
 def test_store_rejects_path_traversal(tmp_path):
     with pytest.raises(ValueError):
         JobStore(tmp_path).load('../outside')
+
+
+def test_new_jobs_use_readable_folders_resolved_by_full_id(tmp_path):
+    store = JobStore(tmp_path)
+    first = store.create('影片标题.mp4', 'local', '')
+    second = store.create('影片标题.mp4', 'local', '')
+
+    assert store.directory(first['id']).name == f"影片标题_{first['id'][:8]}"
+    assert store.directory(second['id']).name == f"影片标题_{second['id'][:8]}"
+    assert store.directory(first['id']) != store.directory(second['id'])
+    assert store.load(first['id'])['id'] == first['id']
+
+
+def test_directory_falls_back_to_legacy_full_id_folder(tmp_path):
+    store = JobStore(tmp_path)
+    job_id = 'a' * 32
+    folder = tmp_path / job_id
+    folder.mkdir()
+    (folder / 'job.json').write_text(json.dumps({
+        'id': job_id, 'title': 'Legacy', 'created': 1,
+    }), encoding='utf-8')
+
+    assert store.directory(job_id) == folder
+    assert store.load(job_id)['title'] == 'Legacy'
+
+
+def test_list_deduplicates_same_job_id_and_prefers_readable_folder(tmp_path):
+    store = JobStore(tmp_path)
+    job = store.create('Lecture', 'local', '')
+    readable = store.directory(job['id'])
+    legacy = tmp_path / job['id']
+    legacy.mkdir()
+    (legacy / 'job.json').write_text(
+        (readable / 'job.json').read_text('utf-8'), encoding='utf-8',
+    )
+
+    assert [item['id'] for item in store.list()] == [job['id']]
+
+
+def _write_legacy_job(root, job_id='a' * 32, title='Lecture', **fields):
+    folder = root / job_id
+    folder.mkdir()
+    job = {
+        'id': job_id, 'title': title, 'source': 'local', 'url': '',
+        'created': 1, 'status': 'running', 'segments': [], 'error': '',
+        'edited_text': None, 'output_naming': 'title', **fields,
+    }
+    (folder / 'job.json').write_text(json.dumps(job), encoding='utf-8')
+    return folder, job
+
+
+def test_initialization_migrates_legacy_folder_once(tmp_path):
+    legacy, job = _write_legacy_job(tmp_path)
+
+    store = JobStore(tmp_path)
+    migrated = store.directory(job['id'])
+
+    assert migrated.name == 'Lecture_aaaaaaaa'
+    assert not legacy.exists()
+    assert JobStore(tmp_path).directory(job['id']) == migrated
+
+
+@pytest.mark.parametrize('payload', [
+    '{not json',
+    json.dumps({'id': 'b' * 32, 'title': 'Wrong job'}),
+])
+def test_migration_ignores_invalid_or_mismatched_metadata(tmp_path, payload):
+    legacy = tmp_path / ('a' * 32)
+    legacy.mkdir()
+    (legacy / 'job.json').write_text(payload, encoding='utf-8')
+
+    JobStore(tmp_path)
+
+    assert legacy.is_dir()
+
+
+def test_migration_collision_keeps_legacy_job_loadable(tmp_path):
+    legacy, job = _write_legacy_job(tmp_path)
+    destination = tmp_path / 'Lecture_aaaaaaaa'
+    destination.mkdir()
+    (destination / 'job.json').write_text(json.dumps({
+        'id': 'b' * 32, 'title': 'Other', 'created': 2,
+    }), encoding='utf-8')
+
+    store = JobStore(tmp_path)
+
+    assert legacy.is_dir()
+    assert store.directory(job['id']) == legacy
+    assert store.load(job['id'])['title'] == 'Lecture'
+
+
+def test_migration_rename_failure_keeps_legacy_job_loadable(
+        tmp_path, monkeypatch):
+    legacy, job = _write_legacy_job(tmp_path)
+    original_rename = Path.rename
+
+    def fail_legacy_rename(path, target):
+        if path == legacy:
+            raise PermissionError('busy')
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, 'rename', fail_legacy_rename)
+    store = JobStore(tmp_path)
+
+    assert store.directory(job['id']) == legacy
+    assert store.load(job['id'])['title'] == 'Lecture'
+
+
+def test_migration_rebases_managed_media_path_for_cleanup(tmp_path):
+    job_id = 'a' * 32
+    legacy = tmp_path / job_id
+    media = legacy / 'input.mp4'
+    legacy, job = _write_legacy_job(
+        tmp_path, job_id=job_id, status='complete',
+        segments=[{'start': 0, 'end': 1, 'text': 'Words'}],
+        media_path=str(media), media_managed=True, auto_cleanup_media=True,
+    )
+    media.write_bytes(b'media')
+    (legacy / 'Lecture.txt').write_text('Words', encoding='utf-8')
+    (legacy / 'Lecture.srt').write_text(
+        '1\n00:00:00,000 --> 00:00:01,000\nWords\n', encoding='utf-8',
+    )
+
+    store = JobStore(tmp_path)
+    migrated = store.directory(job_id)
+    loaded = store.load(job_id)
+
+    assert migrated.name == 'Lecture_aaaaaaaa'
+    assert Path(loaded['media_path']) == migrated / 'input.mp4'
+    assert store.cleanup_media(job_id)['cleanup_status'] == 'complete'
+    assert not (migrated / 'input.mp4').exists()
 
 
 def test_title_named_outputs_preserve_edits_and_separate_duplicate_titles(tmp_path):
