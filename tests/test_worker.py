@@ -26,6 +26,7 @@ def test_worker_uses_saved_options_and_persists_completion(tmp_path, monkeypatch
     media = tmp_path / 'lecture.wav'
     media.write_bytes(b'audio')
     job = store.create('Lecture', 'local', '')
+    assert store.directory(job['id']).name == f"Lecture_{job['id'][:8]}"
     job.update(media_path=str(media), model='small', language='ms',
                glossary='photosynthesis')
     store.save(job)
@@ -56,6 +57,7 @@ def test_worker_honors_existing_stop_without_starting_transcription(
     job.update(media_path=str(media), model='small', language=None, glossary='')
     store.save(job)
     store.request_stop(job['id'])
+    assert (store.directory(job['id']) / 'stop.requested').is_file()
 
     def must_not_run(*_args, **_kwargs):
         raise AssertionError('transcription started after Stop')
