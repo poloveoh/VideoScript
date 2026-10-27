@@ -136,6 +136,27 @@ def test_migration_rename_failure_keeps_legacy_job_loadable(
 
     assert store.directory(job['id']) == legacy
     assert store.load(job['id'])['title'] == 'Lecture'
+    assert store.migration_errors == [f'{job["id"]}: busy']
+
+
+def test_migration_does_not_follow_legacy_directory_symlink(tmp_path):
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    job_id = 'a' * 32
+    (outside / 'job.json').write_text(json.dumps({
+        'id': job_id, 'title': 'Outside', 'created': 1,
+    }), encoding='utf-8')
+    link = tmp_path / job_id
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip('directory symlinks are unavailable')
+
+    store = JobStore(tmp_path)
+
+    assert link.is_symlink()
+    assert not (tmp_path / 'Outside_aaaaaaaa').exists()
+    assert store.directory(job_id) == link
 
 
 def test_migration_rebases_managed_media_path_for_cleanup(tmp_path):

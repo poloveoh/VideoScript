@@ -61,6 +61,7 @@ def _file_lock(path):
 class JobStore:
     def __init__(self, root=DATA / 'jobs'):
         self.root = Path(root)
+        self.migration_errors = []
         self.root.mkdir(parents=True, exist_ok=True)
         self.migrate_legacy_directories()
 
@@ -68,7 +69,8 @@ class JobStore:
         """Rename valid ID-only job folders without blocking store startup."""
         with STORE_LOCK:
             for source in self.root.iterdir():
-                if not source.is_dir() or not re.fullmatch(r'[a-f0-9]{32}', source.name):
+                if (source.is_symlink() or not source.is_dir()
+                        or not re.fullmatch(r'[a-f0-9]{32}', source.name)):
                     continue
                 try:
                     path = source / 'job.json'
@@ -91,11 +93,17 @@ class JobStore:
                         if rebase_media:
                             job['media_path'] = str(destination / media_path.name)
                             self._write_job_json(job, destination)
-                    except Exception:
-                        destination.rename(source)
+                    except Exception as exc:
+                        self.migration_errors.append(f'{source.name}: {exc}')
+                        try:
+                            destination.rename(source)
+                        except OSError as rollback_exc:
+                            self.migration_errors.append(
+                                f'{source.name}: rollback failed: {rollback_exc}',
+                            )
                 except (OSError, ValueError, TypeError, AttributeError, KeyError,
-                        json.JSONDecodeError):
-                    continue
+                        json.JSONDecodeError) as exc:
+                    self.migration_errors.append(f'{source.name}: {exc}')
 
     @staticmethod
     def _validate_job_id(job_id):
