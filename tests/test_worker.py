@@ -272,3 +272,44 @@ def test_stop_worker_preserves_already_terminal_job(tmp_path, monkeypatch, statu
     assert stop_worker(job['id'], store, timeout=0)['status'] == status
     assert not store.stop_requested(job['id'])
     assert terminated == []
+
+
+def test_worker_records_os_process_identity(tmp_path):
+    from worker import process_identity
+    identity = process_identity(os.getpid())
+    assert identity
+    assert process_identity(os.getpid()) == identity
+    assert process_identity(None) is None
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Missing', 'local', '')
+    run_job(job['id'], store, tmp_path / 'worker.lock')
+    assert store.load(job['id'])['worker_identity'] == identity
+
+
+def test_stop_worker_never_terminates_reused_pid(tmp_path, monkeypatch):
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Reused', 'local', '')
+    store.update_fields(job['id'], worker_pid=4321, worker_identity='original')
+    monkeypatch.setattr('worker.process_is_running', lambda pid: True)
+    monkeypatch.setattr('worker.process_identity', lambda pid: 'other', raising=False)
+    terminated = []
+    monkeypatch.setattr('worker.terminate_process', lambda pid: terminated.append(pid))
+    assert stop_worker(job['id'], store, timeout=0)['status'] == 'paused'
+    assert terminated == []
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows process handle identity')
+def test_launch_records_original_process_handle_identity(tmp_path, monkeypatch):
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Launch', 'local', '')
+
+    class FakeProcess:
+        pid = 4321
+        _handle = 123
+
+    monkeypatch.setattr('worker.subprocess.Popen', lambda *a, **k: FakeProcess())
+    monkeypatch.setattr('worker.process_identity', lambda pid: 'reused-pid')
+    monkeypatch.setattr('worker._windows_process_api', lambda: None)
+    monkeypatch.setattr('worker._windows_identity', lambda api, handle: 'original-handle')
+    launch_worker(job['id'], store)
+    assert store.load(job['id'])['worker_identity'] == 'original-handle'

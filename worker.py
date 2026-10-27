@@ -49,18 +49,55 @@ def process_is_running(pid):
         return False
 
 
-def terminate_process(pid):
+def _windows_identity(kernel32, handle):
+    import ctypes
+    from ctypes.wintypes import FILETIME
+    values = [FILETIME() for _ in range(4)]
+    kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(FILETIME)] * 4
+    kernel32.GetProcessTimes.restype = ctypes.c_bool
+    if not kernel32.GetProcessTimes(handle, *(ctypes.byref(value) for value in values)):
+        return None
+    return str((values[0].dwHighDateTime << 32) | values[0].dwLowDateTime)
+
+
+def process_identity(pid):
+    """Return an OS creation token; a recycled PID has a different token."""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if os.name == 'nt':
+        kernel32 = _windows_process_api()
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            return _windows_identity(kernel32, handle)
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        # Linux start ticks plus boot ID distinguish both PID reuse and reboot.
+        stat = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        return f'{boot}:{stat[19]}'
+    except (OSError, IndexError):
+        return None
+
+
+def terminate_process(pid, identity=None):
     pid = int(pid or 0)
     if pid <= 0 or pid == os.getpid():
         return False
     if not process_is_running(pid):
         return True
+    if identity is not None and process_identity(pid) != identity:
+        return False
     if os.name == 'nt':
         kernel32 = _windows_process_api()
-        handle = kernel32.OpenProcess(0x00100001, False, pid)
+        handle = kernel32.OpenProcess(0x00101001, False, pid)
         if not handle:
             return False
         try:
+            if identity is not None and _windows_identity(kernel32, handle) != identity:
+                return False
             stopped = bool(kernel32.TerminateProcess(handle, 1))
             if stopped:
                 kernel32.WaitForSingleObject(handle, 2000)
@@ -83,20 +120,32 @@ def stop_worker(job_id, store=None, timeout=5.0):
     store.request_stop(job_id)
     current = store.load(job_id)
     pid = current.get('worker_pid')
+    identity = current.get('worker_identity')
+
+    def active():
+        return (process_is_running(pid)
+                and (identity is None or process_identity(pid) == identity))
+
     deadline = time.monotonic() + timeout
     while (
         current.get('status') not in {'paused', 'complete', 'failed'}
-        and process_is_running(pid)
+        and active()
         and time.monotonic() < deadline
     ):
         time.sleep(0.1)
         current = store.load(job_id)
     if current.get('status') in {'complete', 'failed'}:
         return current
-    if process_is_running(pid):
-        terminate_process(pid)
+    if (current.get('worker_pid') != pid
+            or current.get('worker_identity') != identity):
+        return current
+    if active():
+        if identity is None:
+            terminate_process(pid)
+        else:
+            terminate_process(pid, identity=identity)
     return store.update_fields(
-        job_id, status='paused', worker_pid=None, error='',
+        job_id, status='paused', worker_pid=None, worker_identity=None, error='',
         message='转录已停止；尚未返回的当前片段已舍弃。',
     )
 
@@ -153,6 +202,7 @@ def run_job(job_id, store=None, lock_path=DATA / 'transcription.lock'):
                 return job
 
             job.update(status='running', error='', worker_pid=os.getpid(),
+                       worker_identity=process_identity(os.getpid()),
                        heartbeat=time.time(), message='正在准备转录…')
             store.save(job)
 
@@ -203,6 +253,7 @@ def run_job(job_id, store=None, lock_path=DATA / 'transcription.lock'):
                    exception_type=type(exc).__name__,
                    traceback=traceback.format_exc())
         job['worker_pid'] = os.getpid()
+        job['worker_identity'] = process_identity(os.getpid())
         store.save(job)
         return job
 
@@ -222,7 +273,12 @@ def launch_worker(job_id, store=None):
         cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags,
     )
-    store.update_fields(job_id, worker_pid=process.pid)
+    if os.name == 'nt' and hasattr(process, '_handle'):
+        # Popen owns this handle even if the child exits and its PID is reused.
+        identity = _windows_identity(_windows_process_api(), process._handle)
+    else:
+        identity = process_identity(process.pid)
+    store.update_fields(job_id, worker_pid=process.pid, worker_identity=identity)
     return process
 
 

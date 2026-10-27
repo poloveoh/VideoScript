@@ -60,11 +60,13 @@ def test_run_whisper_polls_durable_completion_and_process_exit(tmp_path, monkeyp
                         lambda job_id, store, db: store.update_fields(job_id, status='waiting'))
     alive = {4321}
     monkeypatch.setattr('queue_runner.process_is_running', lambda pid: pid in alive)
+    monkeypatch.setattr('queue_runner.process_identity', lambda pid: 'original-worker')
     launches = []
 
     def launch(job_id, store):
         launches.append(job_id)
-        store.update_fields(job_id, status='running', worker_pid=4321)
+        store.update_fields(job_id, status='running', worker_pid=4321,
+                            worker_identity='original-worker')
 
     monkeypatch.setattr('queue_runner.launch_worker', launch)
     assert active.run_once().state == 'processing'
@@ -169,11 +171,10 @@ def test_recover_missing_job_requests_repair_then_resumes(tmp_path, monkeypatch)
     active.recover()
     assert states(db)[0] == ('processing', 0)
     store.save(saved)  # PlaylistService repairs the immutable job ID on sync.
-    assert active.run_once().state == 'waiting'
     monkeypatch.setattr('queue_runner.prepare_playlist_job',
                         lambda job_id, store, db: store.update_fields(job_id, status='complete'))
     assert active.run_once().state == 'completed'
-    assert states(db) == [('completed', 1), ('waiting', 0)]
+    assert states(db) == [('completed', 0), ('waiting', 0)]
 
 
 def test_exit_stops_active_worker_using_existing_stop_semantics(tmp_path, monkeypatch):
@@ -240,3 +241,101 @@ def test_run_real_worker_failure_is_polled_before_next_fifo(tmp_path, monkeypatc
     assert result.state == 'waiting'
     assert store.load(jobs[0])['status'] == 'failed'
     assert states(db) == [('waiting', 1), ('waiting', 0)]
+
+
+def test_exit_during_blocked_preparation_returns_without_late_launch(tmp_path, monkeypatch):
+    db, store, jobs = setup_queue(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    prepared = threading.Event()
+    launches = []
+
+    def prepare(job_id, store, db):
+        entered.set()
+        assert release.wait(3)
+        prepared.set()
+        return store.load(job_id)
+
+    monkeypatch.setattr('queue_runner.prepare_playlist_job', prepare)
+    monkeypatch.setattr('queue_runner.launch_worker', lambda *a, **k: launches.append(a))
+    stop = threading.Event()
+    thread = threading.Thread(target=runner(db, store).run_until_idle, args=(stop,))
+    thread.start()
+    try:
+        assert entered.wait(1)
+        stop.set()
+        thread.join(0.3)
+        assert not thread.is_alive()
+        # The in-flight preparation retains ownership until it winds down.
+        assert runner(db, store).run_once().state == 'busy'
+    finally:
+        release.set()
+        thread.join(2)
+    assert prepared.wait(1)
+    deadline = time.monotonic() + 1
+    while states(db)[0][0] == 'processing' and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert launches == []
+    assert states(db)[1] == ('waiting', 0)
+
+
+def test_repair_after_first_failure_preserves_retry_execution_across_restart(tmp_path, monkeypatch):
+    db, store, jobs = setup_queue(tmp_path)
+    db.claim_next()
+    db.finish_queue_item(jobs[0], 'failed', 'first attempt failed')
+    saved = store.load(jobs[0])
+    (store.directory(jobs[0]) / 'job.json').unlink()
+    assert runner(db, store).run_once().state == 'repair'
+    restarted = runner(PlaylistDB(db.path), JobStore(store.root))
+    restarted.recover()
+    assert states(db)[0] == ('processing', 1)
+    store.save(saved)
+    restarted.recover()
+    monkeypatch.setattr('queue_runner.prepare_playlist_job',
+                        lambda job_id, store, db: store.update_fields(job_id, status='complete'))
+    assert restarted.run_once().state == 'completed'
+    assert states(db) == [('completed', 1), ('waiting', 0)]
+
+
+@pytest.mark.parametrize('status', ['complete', 'failed'])
+def test_run_retires_terminal_pid_reused_by_unrelated_process(tmp_path, monkeypatch, status):
+    db, store, jobs = setup_queue(tmp_path)
+    historical = store.create('Old worker', 'local', '')
+    store.update_fields(historical['id'], status=status, worker_pid=4321,
+                        worker_identity='original-process')
+    monkeypatch.setattr('queue_runner.process_is_running', lambda pid: pid == 4321)
+    monkeypatch.setattr('queue_runner.process_identity', lambda pid: 'unrelated-process', raising=False)
+    monkeypatch.setattr('queue_runner.prepare_playlist_job',
+                        lambda job_id, store, db: store.update_fields(job_id, status='complete'))
+    assert runner(db, store).run_once().state == 'completed'
+    assert store.load(historical['id'])['worker_pid'] is None
+    assert store.load(historical['id'])['worker_identity'] is None
+
+
+def test_run_retires_terminal_worker_reference_after_exit(tmp_path, monkeypatch):
+    db, store, jobs = setup_queue(tmp_path)
+    db.claim_next()
+    store.update_fields(jobs[0], status='complete', worker_pid=4321,
+                        worker_identity='original-process')
+    monkeypatch.setattr('queue_runner.process_is_running', lambda pid: False)
+    assert runner(db, store).run_once().state == 'completed'
+    assert store.load(jobs[0])['worker_pid'] is None
+    assert store.load(jobs[0])['worker_identity'] is None
+
+
+def test_run_rechecks_transient_missing_file_during_worker_write(tmp_path, monkeypatch):
+    db, store, jobs = setup_queue(tmp_path)
+    db.claim_next()
+    store.update_fields(jobs[0], status='complete')
+    real_load = store.load
+    missing_once = [True]
+
+    def load(job_id):
+        if missing_once:
+            missing_once.pop()
+            raise FileNotFoundError('Concurrent atomic job.json replacement')
+        return real_load(job_id)
+
+    monkeypatch.setattr(store, 'load', load)
+    assert runner(db, store).run_once().state == 'completed'
+    assert states(db)[0] == ('completed', 0)
