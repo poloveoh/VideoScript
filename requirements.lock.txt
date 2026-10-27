@@ -39,6 +39,7 @@ pycryptodomex==3.24.1
 pydeck==0.9.3
 pygments==2.21.0
 pytest==9.1.1
+pystray==0.19.5
 python-dateutil==3.0.0
 python-multipart==0.0.32
 pyyaml==6.0.3
