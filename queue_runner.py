@@ -28,6 +28,7 @@ class QueueRunner:
         self.poll_interval = poll_interval
         self.lock_path = db.path.with_suffix('.runner.lock')
         self.cpu_lock_path = self.store.root.parent / 'transcription.lock'
+        self._shutdown_lock = threading.Lock()
 
     def _processing(self):
         with self.db._connect() as connection:
@@ -134,13 +135,14 @@ class QueueRunner:
                         return RunResult('completed', item.job_id)
                     if stopping():
                         return self._finish(item.job_id, 'interrupted', 'Stopped during preparation')
-                if stopping():
-                    return self._finish(item.job_id, 'interrupted', 'Stopped before worker launch')
-                try:
-                    launch_worker(item.job_id, store=self.store)
-                except Exception as exc:
-                    self.store.update_fields(item.job_id, status='failed', error=str(exc))
-                    return self._finish(item.job_id, 'failed', str(exc))
+                with self._shutdown_lock:
+                    if stopping():
+                        return self._finish(item.job_id, 'interrupted', 'Stopped before worker launch')
+                    try:
+                        launch_worker(item.job_id, store=self.store)
+                    except Exception as exc:
+                        self.store.update_fields(item.job_id, status='failed', error=str(exc))
+                        return self._finish(item.job_id, 'failed', str(exc))
                 return RunResult('processing', item.job_id)
         except WorkerBusy:
             return RunResult('busy')
@@ -168,6 +170,8 @@ class QueueRunner:
             pass
         if stop_event.is_set():
             self._shutdown()
+            if self._has_active_queue_worker():
+                finished.wait()
         if finished.is_set() and errors:
             raise errors[0]
 
@@ -182,6 +186,22 @@ class QueueRunner:
             self._shutdown()
 
     def _shutdown(self):
+        # A daemon already stopping a child must finish before its caller exits.
+        # This guard is never held by caption preparation, which may stay blocked.
+        with self._shutdown_lock:
+            self._stop_active_worker()
+
+    def _has_active_queue_worker(self):
+        for item in self._processing():
+            try:
+                job = self._load_job(item['job_id'])
+            except FileNotFoundError:
+                continue
+            if self._worker_active(job):
+                return True
+        return False
+
+    def _stop_active_worker(self):
         try:
             with WorkerLock(self.lock_path):
                 for item in self._processing():

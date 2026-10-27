@@ -339,3 +339,139 @@ def test_run_rechecks_transient_missing_file_during_worker_write(tmp_path, monke
     monkeypatch.setattr(store, 'load', load)
     assert runner(db, store).run_once().state == 'completed'
     assert states(db)[0] == ('completed', 0)
+
+
+def test_exit_waits_for_daemon_to_finish_stopping_active_worker(tmp_path, monkeypatch):
+    db, store, jobs = setup_queue(tmp_path)
+    db.claim_next()
+    store.update_fields(jobs[0], status='running', worker_pid=4321)
+    active = runner(db, store)
+    stop = threading.Event()
+    polled = threading.Event()
+    stop_entered = threading.Event()
+    release_stop = threading.Event()
+    stop_completed = threading.Event()
+    public_returned = threading.Event()
+    monkeypatch.setattr('queue_runner.process_is_running', lambda pid: pid == 4321)
+    real_run_once = active._run_once
+    real_shutdown = active._shutdown
+
+    def run_once(event):
+        result = real_run_once(event)
+        polled.set()
+        return result
+
+    def delayed_stop(job_id, store):
+        stop_entered.set()
+        assert release_stop.wait(3)
+        result = store.update_fields(job_id, status='paused', worker_pid=None)
+        stop_completed.set()
+        return result
+
+    def shutdown():
+        # Force the daemon to own shutdown before the public caller tries it.
+        if threading.current_thread() is public:
+            assert stop_entered.wait(1)
+        real_shutdown()
+
+    def invoke():
+        try:
+            active.run_until_idle(stop)
+        finally:
+            public_returned.set()
+
+    monkeypatch.setattr(active, '_run_once', run_once)
+    monkeypatch.setattr(active, '_shutdown', shutdown)
+    monkeypatch.setattr('queue_runner.stop_worker', delayed_stop)
+    public = threading.Thread(target=invoke)
+    public.start()
+    try:
+        assert polled.wait(1)
+        stop.set()
+        assert stop_entered.wait(1)
+        assert not public_returned.wait(0.1)
+        assert not stop_completed.is_set()
+    finally:
+        release_stop.set()
+        public.join(2)
+    assert public_returned.is_set()
+    assert stop_completed.is_set()
+    assert states(db) == [('waiting', 1), ('waiting', 0)]
+
+
+def test_exit_waits_when_active_worker_poll_holds_runner_lock(tmp_path, monkeypatch):
+    db, store, jobs = setup_queue(tmp_path)
+    db.claim_next()
+    store.update_fields(jobs[0], status='running', worker_pid=4321)
+    active = runner(db, store)
+    stop = threading.Event()
+    poll_entered = threading.Event()
+    release_poll = threading.Event()
+    stop_completed = threading.Event()
+
+    def running(pid):
+        if (pid == 4321 and threading.current_thread().daemon
+                and not poll_entered.is_set()):
+            poll_entered.set()
+            assert release_poll.wait(3)
+        return pid == 4321
+
+    def stopped(job_id, store):
+        result = store.update_fields(job_id, status='paused', worker_pid=None)
+        stop_completed.set()
+        return result
+
+    # Block the first active poll inside run_once rather than startup recovery.
+    monkeypatch.setattr(active, 'recover', lambda: None)
+    monkeypatch.setattr('queue_runner.process_is_running', running)
+    monkeypatch.setattr('queue_runner.stop_worker', stopped)
+    public = threading.Thread(target=active.run_until_idle, args=(stop,))
+    public.start()
+    try:
+        assert poll_entered.wait(1)
+        stop.set()
+        public.join(0.1)
+        assert public.is_alive()
+        assert not stop_completed.is_set()
+    finally:
+        release_poll.set()
+        public.join(2)
+    assert not public.is_alive()
+    assert stop_completed.is_set()
+
+
+def test_exit_waits_for_inflight_launch_to_publish_and_stop_worker(tmp_path, monkeypatch):
+    db, store, jobs = setup_queue(tmp_path)
+    active = runner(db, store)
+    stop = threading.Event()
+    launch_entered = threading.Event()
+    release_launch = threading.Event()
+    stop_completed = threading.Event()
+
+    def launch(job_id, store):
+        launch_entered.set()
+        assert release_launch.wait(3)
+        store.update_fields(job_id, status='running', worker_pid=4321)
+
+    def stopped(job_id, store):
+        result = store.update_fields(job_id, status='paused', worker_pid=None)
+        stop_completed.set()
+        return result
+
+    monkeypatch.setattr('queue_runner.prepare_playlist_job',
+                        lambda job_id, store, db: store.load(job_id))
+    monkeypatch.setattr('queue_runner.launch_worker', launch)
+    monkeypatch.setattr('queue_runner.process_is_running', lambda pid: pid == 4321)
+    monkeypatch.setattr('queue_runner.stop_worker', stopped)
+    public = threading.Thread(target=active.run_until_idle, args=(stop,))
+    public.start()
+    try:
+        assert launch_entered.wait(1)
+        stop.set()
+        public.join(0.1)
+        assert public.is_alive()
+    finally:
+        release_launch.set()
+        public.join(2)
+    assert not public.is_alive()
+    assert stop_completed.is_set()
