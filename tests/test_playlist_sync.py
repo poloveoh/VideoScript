@@ -23,6 +23,7 @@ def test_canonicalizes_playlist_url(value, expected):
     'http://youtube.com/playlist?list=PLabc',
     'https://youtube.com.evil.test/playlist?list=PLabc',
     'https://user:pass@youtube.com/playlist?list=PLabc',
+    'https://@youtube.com/playlist?list=PLabc',
     'https://youtube.com/playlist?list=',
     'https://youtube.com/playlist?list=bad%20id',
     'https://youtu.be/PLabc',
@@ -68,7 +69,10 @@ def test_fetch_playlist_extracts_flat_entries_and_preserves_first_occurrences(mo
             None,
             {'id': 'BaW_jenozKc', 'title': 'Duplicate'},
             {'id': 'dQw4w9WgXcQ', 'title': 'Second'},
-            {'id': 'unavailable', 'title': '[Deleted video]'},
+            {'id': 'Abcdefghijk', 'title': 'Unavailable',
+             'availability': 'unavailable'},
+            {'id': 'Lmnopqrstuv', 'title': 'Private', 'availability': 'private'},
+            {'id': 'WxyzABCDEFG', 'title': 'Deleted', 'availability': 'deleted'},
             {'title': 'No ID'},
         ],
     }
@@ -102,5 +106,20 @@ def test_fetch_playlist_rejects_ytdlp_playlist_id_mismatch(monkeypatch):
     seen = {}
     _install_fake_ytdlp(monkeypatch,
                         {'id': 'PLother', 'title': 'Wrong', 'entries': []}, seen)
+    with pytest.raises(ValueError, match='(?i)playlist'):
+        fetch_playlist('https://youtube.com/playlist?list=PLrequested')
+
+
+@pytest.mark.parametrize('info', [
+    {'title': 'Missing ID', 'entries': []},
+    {'id': '', 'title': 'Empty ID', 'entries': []},
+    {'id': None, 'title': 'Null ID', 'entries': []},
+])
+def test_fetch_playlist_rejects_missing_or_empty_ytdlp_playlist_id(
+        monkeypatch, info):
+    from playlist_sync import fetch_playlist
+
+    seen = {}
+    _install_fake_ytdlp(monkeypatch, info, seen)
     with pytest.raises(ValueError, match='(?i)playlist'):
         fetch_playlist('https://youtube.com/playlist?list=PLrequested')

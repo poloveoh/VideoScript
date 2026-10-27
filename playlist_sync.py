@@ -42,8 +42,8 @@ def fetch_playlist(url: str) -> PlaylistSnapshot:
     if not isinstance(info, dict):
         raise ValueError('yt-dlp did not return Playlist metadata.')
     extracted_id = info.get('id')
-    if extracted_id and extracted_id != playlist_id:
-        raise ValueError('yt-dlp returned a different Playlist than requested.')
+    if not isinstance(extracted_id, str) or not extracted_id or extracted_id != playlist_id:
+        raise ValueError('yt-dlp did not return the requested Playlist ID.')
 
     videos = []
     seen_ids = set()

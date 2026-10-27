@@ -33,3 +33,35 @@
 Implementation commit: `d25ca6074d2d221124cfc3b01ebe8ccac51033e3` (`feat: discover youtube playlists`).
 
 Test assertion correction and final verification report commit: `e5b3b146dc9587e1e1144883176c72d50d5c5a54` (`docs: record playlist discovery verification`).
+
+## Round 1 reviewer fixes
+
+### RED
+
+Command:
+
+```powershell
+C:\Users\USER\Documents\Codex\VideoScript\.venv\Scripts\python.exe -m pytest tests/test_playlist_sync.py -q
+```
+
+Result before implementation: **4 failed, 14 passed**. The empty-userinfo URL did not raise, and yt-dlp results with missing, empty, or null Playlist IDs did not raise. Valid 11-character unavailable/private/deleted fixtures were added to exercise the existing filtering behavior.
+
+### GREEN
+
+Focused command:
+
+```powershell
+C:\Users\USER\Documents\Codex\VideoScript\.venv\Scripts\python.exe -m pytest tests/test_playlist_sync.py -q
+```
+
+Result: **18 passed in 0.20s**.
+
+Full suite command:
+
+```powershell
+C:\Users\USER\Documents\Codex\VideoScript\.venv\Scripts\python.exe -m pytest -q
+```
+
+Result: **119 passed, 1 skipped, 1 warning in 22.01s**. The warning remains the existing `ctranslate2` deprecation warning for `pkg_resources`.
+
+Fix commit hash: pending.

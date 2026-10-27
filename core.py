@@ -63,7 +63,7 @@ def canonical_youtube_playlist_url(value: str) -> tuple[str, str]:
         query = parse_qs(parsed.query, keep_blank_values=True)
     except (AttributeError, TypeError, ValueError):
         raise ValueError('请输入有效的 HTTPS YouTube 播放列表链接。') from None
-    if (parsed.scheme != 'https' or parsed.username or parsed.password
+    if (parsed.scheme != 'https' or '@' in parsed.netloc
             or port not in (None, 443)
             or host not in {'youtube.com', 'www.youtube.com', 'm.youtube.com',
                             'music.youtube.com'}
