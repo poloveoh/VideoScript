@@ -64,4 +64,4 @@ C:\Users\USER\Documents\Codex\VideoScript\.venv\Scripts\python.exe -m pytest -q
 
 Result: **119 passed, 1 skipped, 1 warning in 22.01s**. The warning remains the existing `ctranslate2` deprecation warning for `pkg_resources`.
 
-Fix commit hash: pending.
+Fix commit hash: `19e1c7a7f0470c59b91407b9ee6762180bfd7828` (`fix: validate discovered playlist identity`).
