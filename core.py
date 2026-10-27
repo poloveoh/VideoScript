@@ -4,21 +4,35 @@ import re
 from urllib.parse import parse_qs, urlparse
 
 
-def output_filename_stem(title: str) -> str:
-    """Keep video titles readable while producing a Windows-safe basename."""
+def _safe_title_stem(title: str, max_utf16_units: int = 80) -> str:
     title = re.sub(
         r'\.(mp4|mkv|mov|avi|webm|m4v|mp3|wav|m4a|aac|flac|ogg)$',
         '', title.strip(), flags=re.IGNORECASE,
     )
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title).strip(' .')
     # Bound UTF-16 length too, since Windows counts emoji as two code units.
-    stem = stem.encode('utf-16-le')[:160].decode('utf-16-le', errors='ignore').rstrip(' .')
+    stem = stem.encode('utf-16-le')[:max_utf16_units * 2].decode(
+        'utf-16-le', errors='ignore',
+    ).rstrip(' .')
     if not stem:
         return 'transcript'
     if re.fullmatch(r'CON|CONIN\$|CONOUT\$|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]',
                     stem.split('.')[0].rstrip(), flags=re.IGNORECASE):
         stem = '_' + stem
     return stem
+
+
+def output_filename_stem(title: str) -> str:
+    """Keep video titles readable while producing a Windows-safe basename."""
+    return _safe_title_stem(title)
+
+
+def job_folder_name(title: str, job_id: str) -> str:
+    """Build a readable, unique task-folder name from a full job ID."""
+    if not re.fullmatch(r'[a-f0-9]{32}', job_id):
+        raise ValueError('无效的任务编号。')
+    suffix = '_' + job_id[:8]
+    return _safe_title_stem(title, 80 - len(suffix)) + suffix
 
 
 def canonical_youtube_url(value: str) -> str:

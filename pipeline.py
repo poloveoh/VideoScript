@@ -10,8 +10,8 @@ import threading
 import time
 import uuid
 
-from core import (canonical_youtube_url, output_filename_stem, parse_json3,
-                  plain_text, to_srt)
+from core import (canonical_youtube_url, job_folder_name,
+                  output_filename_stem, parse_json3, plain_text, to_srt)
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data'
@@ -61,11 +61,77 @@ def _file_lock(path):
 class JobStore:
     def __init__(self, root=DATA / 'jobs'):
         self.root = Path(root)
+        self.migration_errors = []
         self.root.mkdir(parents=True, exist_ok=True)
+        self.migrate_legacy_directories()
 
-    def directory(self, job_id):
+    def migrate_legacy_directories(self):
+        """Rename valid ID-only job folders without blocking store startup."""
+        with STORE_LOCK:
+            for source in self.root.iterdir():
+                if (source.is_symlink() or not source.is_dir()
+                        or not re.fullmatch(r'[a-f0-9]{32}', source.name)):
+                    continue
+                try:
+                    path = source / 'job.json'
+                    job = json.loads(path.read_text('utf-8'))
+                    if not isinstance(job, dict) or job.get('id') != source.name:
+                        continue
+                    destination = self.root / job_folder_name(
+                        job['title'], job['id'],
+                    )
+                    if destination.exists():
+                        continue
+
+                    media_path = Path(job.get('media_path', ''))
+                    rebase_media = (
+                        job.get('media_managed', False)
+                        and media_path.parent.resolve() == source.resolve()
+                    )
+                    source.rename(destination)
+                    try:
+                        if rebase_media:
+                            job['media_path'] = str(destination / media_path.name)
+                            self._write_job_json(job, destination)
+                    except Exception as exc:
+                        self.migration_errors.append(f'{source.name}: {exc}')
+                        try:
+                            destination.rename(source)
+                        except OSError as rollback_exc:
+                            self.migration_errors.append(
+                                f'{source.name}: rollback failed: {rollback_exc}',
+                            )
+                except (OSError, ValueError, TypeError, AttributeError, KeyError,
+                        json.JSONDecodeError) as exc:
+                    self.migration_errors.append(f'{source.name}: {exc}')
+
+    @staticmethod
+    def _validate_job_id(job_id):
         if not re.fullmatch(r'[a-f0-9]{32}', job_id):
             raise ValueError('无效的任务编号。')
+        return job_id
+
+    def _find_directory(self, job_id):
+        self._validate_job_id(job_id)
+        matches = []
+        for path in self.root.glob('*/job.json'):
+            try:
+                job = json.loads(path.read_text('utf-8'))
+                if job.get('id') != job_id:
+                    continue
+                canonical = job_folder_name(job['title'], job_id)
+                matches.append((path.parent.name == canonical, path.parent))
+            except (OSError, ValueError, TypeError, AttributeError, KeyError):
+                continue
+        if matches:
+            return max(matches, key=lambda item: item[0])[1]
+        return None
+
+    def directory(self, job_id):
+        self._validate_job_id(job_id)
+        found = self._find_directory(job_id)
+        if found is not None:
+            return found
         return self.root / job_id
 
     def create(self, title, source, url):
@@ -78,13 +144,16 @@ class JobStore:
 
     def save(self, job):
         with STORE_LOCK:
-            folder = self.directory(job['id'])
+            self._validate_job_id(job['id'])
+            folder = self._find_directory(job['id'])
+            if folder is None:
+                folder = self.root / job_folder_name(job['title'], job['id'])
             with _file_lock(folder / '.job.lock'):
                 path = folder / 'job.json'
                 if path.exists():
                     current = json.loads(path.read_text('utf-8'))
                     job['edited_text'] = current.get('edited_text')
-                self._write(job)
+                self._write(job, folder)
 
     def save_edits(self, job_id, text):
         with STORE_LOCK:
@@ -103,10 +172,10 @@ class JobStore:
                 self._write(job)
                 return job
 
-    def _write(self, job):
-        folder = self.directory(job['id'])
+    def _write(self, job, folder=None):
+        folder = Path(folder) if folder is not None else self.directory(job['id'])
         folder.mkdir(parents=True, exist_ok=True)
-        self._write_job_json(job)
+        self._write_job_json(job, folder)
         text_name, subtitle_name = output_filenames(job)
         for name, content in [
             (text_name, job.get('edited_text') if job.get('edited_text') is not None else plain_text(job['segments'])),
@@ -116,8 +185,8 @@ class JobStore:
             temp.write_text(content, encoding='utf-8')
             temp.replace(folder / name)
 
-    def _write_job_json(self, job):
-        folder = self.directory(job['id'])
+    def _write_job_json(self, job, folder=None):
+        folder = Path(folder) if folder is not None else self.directory(job['id'])
         folder.mkdir(parents=True, exist_ok=True)
         temp = folder / 'job.json.tmp'
         temp.write_text(
@@ -132,13 +201,22 @@ class JobStore:
                 return json.loads((folder / 'job.json').read_text('utf-8'))
 
     def list(self):
-        jobs = []
+        jobs = {}
         for path in self.root.glob('*/job.json'):
             try:
-                jobs.append(json.loads(path.read_text('utf-8')))
-            except (OSError, ValueError):
+                job = json.loads(path.read_text('utf-8'))
+                job_id = self._validate_job_id(job['id'])
+                canonical = job_folder_name(job['title'], job_id)
+                score = path.parent.name == canonical
+                previous = jobs.get(job_id)
+                if previous is None or score > previous[0]:
+                    jobs[job_id] = (score, job)
+            except (OSError, ValueError, TypeError, AttributeError, KeyError):
                 continue
-        return sorted(jobs, key=lambda job: job['created'], reverse=True)
+        return sorted(
+            (item[1] for item in jobs.values()),
+            key=lambda job: job['created'], reverse=True,
+        )
 
     def request_stop(self, job_id):
         marker = self.directory(job_id) / 'stop.requested'
