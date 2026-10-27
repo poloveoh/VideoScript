@@ -77,6 +77,9 @@ def terminate_process(pid):
 
 def stop_worker(job_id, store=None, timeout=5.0):
     store = store or JobStore()
+    current = store.load(job_id)
+    if current.get('status') in {'complete', 'failed'}:
+        return current
     store.request_stop(job_id)
     current = store.load(job_id)
     pid = current.get('worker_pid')
@@ -176,7 +179,8 @@ def run_job(job_id, store=None, lock_path=DATA / 'transcription.lock'):
             result['elapsed'] = round(
                 result.get('elapsed', 0) + time.monotonic() - started, 1,
             )
-            result.pop('worker_pid', None)
+            # Keep the PID until the process actually exits, including cleanup.
+            result['worker_pid'] = os.getpid()
             store.save(result)
             try:
                 return store.cleanup_media(job_id)
@@ -198,7 +202,7 @@ def run_job(job_id, store=None, lock_path=DATA / 'transcription.lock'):
         job.update(status='failed', error=str(exc), message='转录失败。',
                    exception_type=type(exc).__name__,
                    traceback=traceback.format_exc())
-        job.pop('worker_pid', None)
+        job['worker_pid'] = os.getpid()
         store.save(job)
         return job
 
@@ -213,7 +217,8 @@ def launch_worker(job_id, store=None):
     if os.name == 'nt':
         flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     process = subprocess.Popen(
-        [sys.executable, str(ROOT / 'worker.py'), job_id],
+        [sys.executable, str(ROOT / 'worker.py'), job_id,
+         '--jobs-root', str(store.root.resolve())],
         cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags,
     )
@@ -222,6 +227,11 @@ def launch_worker(job_id, store=None):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
+    if len(sys.argv) == 4 and sys.argv[2] == '--jobs-root':
+        worker_store = JobStore(Path(sys.argv[3]))
+        run_job(sys.argv[1], store=worker_store,
+                lock_path=worker_store.root.parent / 'transcription.lock')
+    elif len(sys.argv) == 2:
+        run_job(sys.argv[1])
+    else:
         raise SystemExit('用法：worker.py <任务编号>')
-    run_job(sys.argv[1])

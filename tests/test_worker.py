@@ -210,3 +210,65 @@ def test_unexpected_cleanup_error_does_not_fail_completed_transcription(
     assert result['cleanup_status'] == 'failed'
     assert 'cleanup unavailable' in result['cleanup_error']
     assert media.exists()
+
+
+def test_launch_worker_passes_custom_store_to_child(tmp_path, monkeypatch):
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Missing media', 'local', '')
+    process = launch_worker(job['id'], store=store)
+    try:
+        process.wait(timeout=15)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+    saved = store.load(job['id'])
+    assert process.returncode == 0
+    assert saved['status'] == 'failed'
+    assert saved['exception_type'] == 'FileNotFoundError'
+
+
+def test_worker_retains_pid_until_process_exit_for_durable_polling(tmp_path, monkeypatch):
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Missing', 'local', '')
+    run_job(job['id'], store, tmp_path / 'worker.lock')
+    assert store.load(job['id'])['status'] == 'failed'
+    assert store.load(job['id'])['worker_pid'] == os.getpid()
+
+
+def test_completed_worker_retains_pid_while_cleanup_runs(tmp_path, monkeypatch):
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Lecture', 'local', '')
+    media = tmp_path / 'audio.wav'
+    media.write_bytes(b'audio')
+    store.update_fields(job['id'], media_path=str(media))
+
+    def transcribe(path, size, language, glossary, used_store, active, report):
+        return process_transcription(used_store, active, iter([
+            {'start': 0, 'end': 1, 'text': 'Complete.'},
+        ]), 1, report)
+
+    def cleanup(job_id):
+        current = store.load(job_id)
+        assert current['status'] == 'complete'
+        assert current['worker_pid'] == os.getpid()
+        return current
+
+    monkeypatch.setattr('worker.transcribe', transcribe)
+    monkeypatch.setattr(store, 'cleanup_media', cleanup)
+    result = run_job(job['id'], store, tmp_path / 'worker.lock')
+    assert result.get('cleanup_status') != 'failed'
+    assert result['worker_pid'] == os.getpid()
+
+
+@pytest.mark.parametrize('status', ['complete', 'failed'])
+def test_stop_worker_preserves_already_terminal_job(tmp_path, monkeypatch, status):
+    store = JobStore(tmp_path / 'jobs')
+    job = store.create('Finished', 'local', '')
+    store.update_fields(job['id'], status=status, worker_pid=4321)
+    monkeypatch.setattr('worker.process_is_running', lambda pid: True)
+    terminated = []
+    monkeypatch.setattr('worker.terminate_process', lambda pid: terminated.append(pid))
+    assert stop_worker(job['id'], store, timeout=0)['status'] == status
+    assert not store.stop_requested(job['id'])
+    assert terminated == []
