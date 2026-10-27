@@ -22,6 +22,31 @@ def test_output_filename_stem_is_readable_and_windows_safe(title, expected):
     assert output_filename_stem(title) == expected
 
 
+@pytest.mark.parametrize('title, job_id, expected', [
+    ('影片标题.mp4', 'a' * 32, '影片标题_aaaaaaaa'),
+    ('../影片: "标题"?* ', 'b' * 32, '_影片_ _标题____bbbbbbbb'),
+    ('CON.mp4', 'c' * 32, '_CON_cccccccc'),
+    (' ... ', 'd' * 32, 'transcript_dddddddd'),
+])
+def test_job_folder_name_is_readable_windows_safe_and_unique(
+        title, job_id, expected):
+    from core import job_folder_name
+    assert job_folder_name(title, job_id) == expected
+
+
+def test_job_folder_name_reserves_suffix_inside_windows_length_limit():
+    from core import job_folder_name
+    result = job_folder_name('😀' * 100, '12345678' + 'a' * 24)
+    assert result.endswith('_12345678')
+    assert len(result.encode('utf-16-le')) // 2 <= 80
+
+
+def test_job_folder_name_rejects_invalid_full_job_id():
+    from core import job_folder_name
+    with pytest.raises(ValueError, match='任务编号'):
+        job_folder_name('Lecture', '../outside')
+
+
 @pytest.mark.parametrize('url', [
     'https://www.youtube.com/watch?v=BaW_jenozKc&list=abc',
     'https://youtu.be/BaW_jenozKc?t=10',
