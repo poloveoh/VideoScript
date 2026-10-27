@@ -230,6 +230,40 @@ def test_caption_reader_does_not_treat_html_error_as_transcript(tmp_path):
         read_caption(path)
 
 
+@pytest.mark.parametrize('exact', [False, True])
+def test_caption_extraction_supports_legacy_choice_and_exact_track(tmp_path, monkeypatch, exact):
+    from io import BytesIO
+    import yt_dlp
+    from pipeline import extract_captions
+
+    store = JobStore(tmp_path)
+    job = store.create('Captions', 'youtube', 'https://www.youtube.com/watch?v=abcdefghijk')
+    tracks = [{'ext': 'json3', 'url': 'https://x/first'},
+              {'ext': 'json3', 'url': 'https://x/selected'}]
+    requested = []
+
+    class YoutubeDL:
+        def __init__(self, options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def urlopen(self, url):
+            requested.append(url)
+            return BytesIO(b'{"events":[{"segs":[{"utf8":"Caption words."}]}]}')
+
+    monkeypatch.setattr(yt_dlp, 'YoutubeDL', YoutubeDL)
+    result = extract_captions({'subtitles': {'en': tracks}}, ('manual', 'en'), store, job,
+                              **({'track': tracks[1]} if exact else {}))
+    assert requested == ['https://x/selected' if exact else 'https://x/first']
+    assert result['status'] == 'complete'
+    assert (store.directory(job['id']) / 'Captions.txt').read_text('utf-8') == 'Caption words.'
+
+
 def test_transcription_failure_preserves_completed_segments(tmp_path):
     store = JobStore(tmp_path)
     job = store.create('test', 'local', '')

@@ -353,11 +353,12 @@ def read_caption(path):
         raise ValueError('字幕无法读取；可能是网络限制或无效字幕，请尝试其他字幕或本地转录。') from exc
 
 
-def extract_captions(info, choice, store, job):
+def extract_captions(info, choice, store, job, *, track=None):
     from yt_dlp import YoutubeDL
     kind, language = choice
     tracks = info['subtitles' if kind == 'manual' else 'automatic_captions'][language]
-    track = next(t for t in tracks if t.get('ext') == 'json3')
+    if track is None:
+        track = next(t for t in tracks if t.get('ext') == 'json3')
     path = store.directory(job['id']) / 'captions.json3'
     try:
         with YoutubeDL(_options()) as ydl:
