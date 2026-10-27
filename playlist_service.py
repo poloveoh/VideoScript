@@ -55,7 +55,9 @@ class PlaylistService:
                 summary.created += 1
             self.db.link_job(video.video_id, job['id'], 'discovery')
             summary.linked += 1
-        if job.get('status') == 'waiting':
+        if job.get('status') == 'complete':
+            self.db.enqueue(job['id'], video.video_id, completed=True)
+        elif job.get('status') == 'waiting':
             self.db.enqueue(job['id'], video.video_id)
 
     def sync_playlist(self, playlist_id: int) -> SyncSummary:

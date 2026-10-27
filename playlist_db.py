@@ -227,8 +227,8 @@ class PlaylistDB:
                                      (video_id,)).fetchone()
             return row['job_id'] if row else None
 
-    def enqueue(self, job_id, video_id):
-        """Append once. Existing terminal items never implicitly become runnable."""
+    def enqueue(self, job_id, video_id, *, completed=False):
+        """Append once; reconciled completions are persisted without runnable work."""
         with self._write() as connection:
             row = connection.execute('SELECT * FROM queue_items WHERE job_id=?',
                                      (job_id,)).fetchone()
@@ -239,9 +239,12 @@ class PlaylistDB:
             history = connection.execute(
                 'SELECT retry_count FROM playlist_jobs WHERE job_id=?', (job_id,)
             ).fetchone()
-            connection.execute('''INSERT INTO queue_items (job_id, video_id, created_at, retry_count)
-                VALUES (?, ?, ?, ?)''',
-                (job_id, video_id, time.time(), history['retry_count'] if history else 0))
+            now = time.time()
+            connection.execute('''INSERT INTO queue_items
+                (job_id, video_id, created_at, retry_count, state, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?)''',
+                (job_id, video_id, now, history['retry_count'] if history else 0,
+                 'completed' if completed else 'waiting', now if completed else None))
             return QueueItem(**dict(connection.execute(
                 'SELECT * FROM queue_items WHERE job_id=?', (job_id,)).fetchone()))
 

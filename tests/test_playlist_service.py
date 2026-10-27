@@ -72,7 +72,11 @@ def test_reconcile_manual_jobs_preserves_status_without_duplicate_work(setup, st
     assert result.created == 0
     assert db.find_job_id(VIDEO) == job['id']
     assert store.load(job['id'])['status'] == status
-    assert rows(db, 'queue_items') == []
+    if status == 'complete':
+        assert rows(db, 'queue_items')[0]['state'] == 'completed'
+        assert db.claim_next() is None
+    else:
+        assert rows(db, 'queue_items') == []
 
 
 def test_snapshot_is_persisted_before_creation(setup, monkeypatch):
@@ -180,6 +184,28 @@ def test_missing_completed_job_is_not_recreated(setup):
     service.sync_playlist(playlist.id)
     assert store.list() == []
     assert rows(db, 'queue_items')[0]['state'] == 'completed'
+
+
+def test_completed_manual_job_survives_missing_metadata_without_transcript_loss(setup):
+    db, store, playlist, service = setup
+    job = store.create('Manual', 'youtube', 'https://youtu.be/abcdefghijk')
+    store.update_fields(job['id'], status='complete', segments=[
+        {'start': 0, 'end': 2, 'text': 'Preserve the finished transcript.'},
+    ])
+    folder = store.directory(job['id'])
+    transcript = (folder / 'Manual.txt').read_bytes()
+    subtitles = (folder / 'Manual.srt').read_bytes()
+    assert not service.sync_playlist(playlist.id).error
+    (folder / 'job.json').unlink()
+    # Restart both stores: completion must survive outside job.json.
+    from playlist_service import PlaylistService
+    restarted = PlaylistService(PlaylistDB(db.path), JobStore(store.root), service.fetcher)
+    assert not restarted.sync_playlist(playlist.id).error
+    assert db.find_job_id(VIDEO) == job['id']
+    assert db.claim_next() is None
+    assert not (folder / 'job.json').exists()
+    assert (folder / 'Manual.txt').read_bytes() == transcript
+    assert (folder / 'Manual.srt').read_bytes() == subtitles
 
 
 def test_invalid_and_duplicate_video_ids_never_create_jobs(setup):

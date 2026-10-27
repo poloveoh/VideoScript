@@ -76,6 +76,16 @@ def populated(tmp_path):
     return path, db, playlist
 
 
+def test_enqueue_completed_job_is_durable_and_never_claimed(tmp_path):
+    path, db, playlist = populated(tmp_path)
+    item = db.enqueue('job-one', 'aaaaaaaaaaa', completed=True)
+    assert item.state == 'completed'
+    assert item.finished_at is not None
+    restarted = PlaylistDB(path)
+    assert restarted.claim_next() is None
+    assert restarted.enqueue('job-one', 'aaaaaaaaaaa').state == 'completed'
+
+
 def test_snapshot_upserts_global_video_and_preserves_membership_history(tmp_path):
     path, db, playlist = populated(tmp_path)
     other = db.add_or_reactivate_playlist('PL-two', 'url-two', 'Two')
