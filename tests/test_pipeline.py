@@ -568,3 +568,46 @@ def test_cleanup_failure_can_be_retried_without_transcription(
     retried = store.cleanup_media(job['id'])
     assert not media.exists()
     assert retried['cleanup_status'] == 'complete'
+
+
+@pytest.mark.parametrize('url, expected', [
+    ('https://youtu.be/abcdefghijk?t=5', 'abcdefghijk'),
+    ('https://www.youtube.com/shorts/abcdefghijk', 'abcdefghijk'),
+    ('https://youtube.com/watch?v=abcdefghijk&list=PLtest', 'abcdefghijk'),
+    ('https://example.com/watch?v=abcdefghijk', None),
+    ('https://youtube.com/watch?v=abcdefghijkX', None),
+    ('not a url', None),
+])
+def test_extract_youtube_job_video_id(url, expected):
+    from pipeline import extract_youtube_video_id
+    assert extract_youtube_video_id(url) == expected
+
+
+def test_find_youtube_job_reconciles_legacy_completed_duplicates(tmp_path):
+    store = JobStore(tmp_path)
+    first = store.create('Completed', 'youtube', 'https://youtu.be/abcdefghijk')
+    store.update_fields(first['id'], status='complete')
+    store.create('Running', 'youtube', 'https://youtube.com/watch?v=abcdefghijk')
+    store.create('Local', 'local', 'https://youtu.be/abcdefghijk')
+    assert store.find_youtube_job('abcdefghijk')['id'] == first['id']
+    assert store.find_youtube_job('abcdefghijkX') is None
+
+
+def test_find_youtube_job_prefers_explicit_identity_and_is_deterministic(tmp_path):
+    store = JobStore(tmp_path)
+    legacy = store.create('Legacy', 'youtube', 'https://youtu.be/abcdefghijk')
+    store.update_fields(legacy['id'], status='complete')
+    explicit = store.create('Explicit', 'youtube', '')
+    store.update_fields(explicit['id'], youtube_video_id='abcdefghijk')
+    assert store.find_youtube_job('abcdefghijk')['id'] == explicit['id']
+    duplicate = store.create('Duplicate', 'youtube', '')
+    store.update_fields(duplicate['id'], youtube_video_id='abcdefghijk', status='complete')
+    store.update_fields(explicit['id'], status='complete')
+    assert store.find_youtube_job('abcdefghijk')['id'] == min(explicit['id'], duplicate['id'])
+
+
+def test_find_youtube_job_ignores_conflicting_explicit_id(tmp_path):
+    store = JobStore(tmp_path)
+    job = store.create('Conflicting', 'youtube', 'https://youtu.be/abcdefghijk')
+    store.update_fields(job['id'], youtube_video_id='ABCDEFGHIJK')
+    assert store.find_youtube_job('abcdefghijk') is None

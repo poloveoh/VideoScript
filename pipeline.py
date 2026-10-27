@@ -21,6 +21,14 @@ MODEL_LOCK = threading.Lock()
 STORE_LOCK = threading.RLock()
 
 
+def extract_youtube_video_id(url: str) -> str | None:
+    """Extract an exact video identity using the existing URL policy."""
+    try:
+        return canonical_youtube_url(url).rsplit('=', 1)[1]
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def output_filenames(job):
     """Old jobs keep their existing files; new jobs use the video title."""
     if job.get('output_naming') == 'title':
@@ -141,6 +149,25 @@ class JobStore:
                'output_naming': 'title'}
         self.save(job)
         return job
+
+    def find_youtube_job(self, video_id: str) -> dict | None:
+        """Prefer explicit identity, then legacy URLs, without rewriting jobs."""
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+            return None
+        candidates = []
+        for job in self.list():
+            if job.get('source') != 'youtube':
+                continue
+            explicit = job.get('youtube_video_id')
+            if explicit == video_id:
+                candidates.append((0, job))
+            elif not explicit and extract_youtube_video_id(job.get('url')) == video_id:
+                candidates.append((1, job))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: (
+            item[0], item[1].get('status') != 'complete', item[1]['id'],
+        ))[1]
 
     def save(self, job):
         with STORE_LOCK:
