@@ -1,8 +1,53 @@
 from pathlib import Path
+import sys
+
+
+def run_tray_lifecycle():
+    """Keep shutdown cooperative so QueueRunner can finish child cleanup."""
+    import subprocess
+    import threading
+    from pipeline import DATA, JobStore
+    from playlist_db import PlaylistDB
+    from playlist_service import PlaylistService
+    from queue_runner import QueueRunner
+    from tray_app import SyncCoordinator, TrayController
+
+    db = PlaylistDB(DATA / 'videoscript.db')
+    store = JobStore(DATA / 'jobs')
+    controller = TrayController(db, SyncCoordinator(PlaylistService(db, store)),
+                                QueueRunner(db, store))
+
+    def watch_stop():
+        while not controller.stop_event.wait(.1):
+            if (DATA / 'tray.stop').exists():
+                controller.exit()
+                return
+
+    watcher = threading.Thread(target=watch_stop, daemon=True)
+    watcher.start()
+    clean_exit = False
+    try:
+        controller.run()
+        clean_exit = not controller._background_error
+    finally:
+        controller.exit()
+        watcher.join()
+        # Tray failure keeps the server available for diagnosis. A clean
+        # Exit/Stop after successful native setup closes the server.
+        if clean_exit and controller._threads:
+            subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive',
+                            '-ExecutionPolicy', 'Bypass', '-File',
+                            str(Path(__file__).with_name('Stop.ps1')), '-ServerOnly'],
+                           check=False)
+
+
+if __name__ == '__main__' and '--tray-lifecycle' in sys.argv:
+    run_tray_lifecycle()
+    raise SystemExit
 
 import streamlit as st
 
-from core import (canonical_youtube_url, output_filename_stem, plain_text, readable_legacy_text,
+from core import (canonical_youtube_playlist_url, canonical_youtube_url, output_filename_stem, plain_text, readable_legacy_text,
                   timestamp, to_srt)
 from pipeline import (DATA, JobStore, extract_captions, inspect_youtube,
                       subtitle_choices)
@@ -43,6 +88,54 @@ with st.sidebar:
 st.markdown('<div class="eyebrow">WATCH LESS. READ MORE.</div>', unsafe_allow_html=True)
 st.title('VideoScript')
 st.markdown('<div class="intro">把视频变成可以阅读、修改和带走的文字。</div>', unsafe_allow_html=True)
+
+with st.expander('Playlist 管理 · 自动同步', expanded=True):
+    from playlist_db import PlaylistDB
+    from tray_app import request_sync
+
+    playlist_db = PlaylistDB(DATA / 'videoscript.db')
+    st.caption('托盘每 10 分钟同步；新增视频按 FIFO 顺序处理。刷新页面不会联网同步。')
+    with st.form('playlist_form'):
+        playlist_url = st.text_input('Playlist URL', key='playlist_url')
+        add_playlist = st.form_submit_button('添加 / 重新启用 Playlist', key='add_playlist')
+    if add_playlist:
+        try:
+            canonical, playlist_id = canonical_youtube_playlist_url(playlist_url)
+            playlist_db.add_or_reactivate_playlist(playlist_id, canonical, playlist_id)
+            request_sync(DATA / 'sync.requested')
+            st.success('Playlist 已保存，已请求后台同步。')
+        except ValueError as exc:
+            st.error(f'Playlist 链接无效：{exc}')
+    if st.button('Sync Now · 请求同步', key='sync_playlists'):
+        request_sync(DATA / 'sync.requested')
+        st.success('已请求托盘后台同步。请确保托盘正在运行。')
+    st.caption('Auto Sync：' + ('已暂停' if playlist_db.auto_sync_paused() else '已启用'))
+    for playlist in playlist_db.list_playlists():
+        st.write(playlist.title)
+        st.caption(f"{'已启用' if playlist.enabled else '已停用'} · {playlist.video_count} 个视频 · "
+                   f'上次成功同步：{playlist.last_sync_success_at or "尚未同步"}')
+        if playlist.last_error:
+            st.warning(playlist.last_error)
+        action = 'disable' if playlist.enabled else 'enable'
+        if st.button('停用' if playlist.enabled else '启用', key=f'{action}_playlist_{playlist.id}'):
+            playlist_db.set_playlist_enabled(playlist.id, not playlist.enabled)
+            st.rerun()
+        confirmed = st.checkbox('确认移除 Playlist（保留文字稿）', key=f'confirm_remove_{playlist.id}')
+        if st.button('移除 Playlist', key=f'remove_playlist_{playlist.id}', disabled=not confirmed):
+            playlist_db.soft_remove_playlist(playlist.id)
+            st.rerun()
+    # Read-only views: the coordinator/runner own all queue transitions.
+    with playlist_db._connect() as connection:
+        discoveries = [dict(row) for row in connection.execute(
+            'SELECT title, video_id, first_seen_at FROM videos ORDER BY first_seen_at DESC LIMIT 20')]
+        fifo = [dict(row) for row in connection.execute(
+            'SELECT position, video_id, state, retry_count, error FROM queue_items ORDER BY position')]
+    st.caption('最近发现（最多 20 条）')
+    if discoveries:
+        st.dataframe(discoveries, hide_index=True, width='stretch')
+    st.caption('FIFO 队列（只读）')
+    if fifo:
+        st.dataframe(fifo, hide_index=True, width='stretch')
 
 source = st.radio('视频来源', ['YouTube 链接', '本地视频 / 音频'], horizontal=True, key='source')
 media = None

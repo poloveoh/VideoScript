@@ -1,8 +1,66 @@
 from pathlib import Path
 import os
+import pytest
 from streamlit.testing.v1 import AppTest
 
 APP = Path(__file__).resolve().parents[1] / 'app.py'
+
+
+@pytest.fixture
+def playlist_ui(tmp_path, monkeypatch):
+    import pipeline
+    from playlist_db import PlaylistDB
+    monkeypatch.setattr(pipeline, 'DATA', tmp_path)
+    store = pipeline.JobStore(tmp_path / 'jobs')
+    monkeypatch.setattr(pipeline, 'JobStore', lambda: store)
+    return AppTest.from_file(str(APP)), PlaylistDB(tmp_path / 'videoscript.db'), store
+
+
+def test_playlist_add_validate_toggle_remove_and_reactivate(playlist_ui):
+    app, db, store = playlist_ui
+    app.run()
+    app.text_input(key='playlist_url').set_value('https://example.com/playlist?list=PLtest')
+    app.button(key='add_playlist').click().run()
+    assert not db.list_playlists()
+    assert app.error
+    app.text_input(key='playlist_url').set_value('https://youtube.com/playlist?list=PLtest')
+    app.button(key='add_playlist').click().run()
+    playlist, = db.list_playlists()
+    app.button(key=f'disable_playlist_{playlist.id}').click().run()
+    assert not db.list_playlists()[0].enabled
+    app.button(key=f'enable_playlist_{playlist.id}').click().run()
+    assert db.list_playlists()[0].enabled
+    assert app.button(key=f'remove_playlist_{playlist.id}').disabled
+    app.checkbox(key=f'confirm_remove_{playlist.id}').check().run()
+    app.button(key=f'remove_playlist_{playlist.id}').click().run()
+    assert not db.list_playlists()
+    app.button(key='add_playlist').click().run()
+    assert db.list_playlists()[0].id == playlist.id
+    assert not store.list()
+    assert not app.exception
+
+
+def test_playlist_sync_request_and_readonly_status_without_rerun_fetch(playlist_ui):
+    from playlist_service import PlaylistService
+    from playlist_sync import PlaylistSnapshot, PlaylistVideo
+    app, db, store = playlist_ui
+    playlist = db.add_or_reactivate_playlist('PLtest', 'https://youtube.com/playlist?list=PLtest', 'Lessons')
+    service = PlaylistService(db, store, fetcher=lambda url: PlaylistSnapshot(
+        'PLtest', 'Lessons', url, [PlaylistVideo('abcdefghijk', 'New lesson',
+        'https://youtube.com/watch?v=abcdefghijk', 1, 10, 'en')]))
+    assert not service.sync_playlist(playlist.id).error
+    db.record_sync_failure(playlist.id, 'Network unavailable', 123)
+    app.run()
+    assert not app.exception
+    assert any('Network unavailable' in item.value for item in app.warning)
+    assert any('1' in item.value and '视频' in item.value for item in app.caption)
+    assert any('New lesson' in frame.value.to_string() for frame in app.dataframe)
+    assert any('waiting' in frame.value.to_string() for frame in app.dataframe)
+    app.button(key='sync_playlists').click().run()
+    assert (db.path.parent / 'sync.requested').exists()
+    app.run()
+    assert len(store.list()) == 1
+    assert db.list_playlists()[0].last_error == 'Network unavailable'
 
 
 def test_interface_opens_and_rejects_invalid_link_without_network():
