@@ -17,7 +17,7 @@ def test_schema_is_versioned_and_configures_every_connection(tmp_path):
     db = PlaylistDB(path)
     with db._connect() as connection:
         assert connection.row_factory is sqlite3.Row
-        assert connection.execute('PRAGMA user_version').fetchone()[0] == 1
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 2
         assert connection.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
         assert connection.execute('PRAGMA foreign_keys').fetchone()[0] == 1
         assert connection.execute('PRAGMA busy_timeout').fetchone()[0] == 5000
@@ -199,3 +199,43 @@ def test_queue_rejects_unlinked_video_and_invalid_terminal_state(tmp_path):
         db.finish_queue_item('job-one', 'invented')
     with pytest.raises(ValueError):
         db.finish_queue_item('job-one', 'waiting')
+
+
+@pytest.mark.parametrize('failure', ['failed', 'interrupted'])
+def test_retry_budget_survives_cleanup_reappearance_and_restart(tmp_path, failure):
+    path, db, playlist = populated(tmp_path)
+    first = db.enqueue('job-one', 'aaaaaaaaaaa')
+    db.claim_next()
+    db.finish_queue_item('job-one', failure, 'first failure')
+    db.apply_snapshot(playlist.id, [], 200)
+    assert db.remove_unreferenced_waiting() == ['job-one']
+    assert rows(path, 'SELECT * FROM queue_items') == []
+
+    restarted = PlaylistDB(path)
+    restarted.apply_snapshot(playlist.id, [video()], 300)
+    restored = restarted.enqueue('job-one', 'aaaaaaaaaaa')
+    assert restored.position > first.position
+    assert restored.retry_count == 1
+    assert restarted.claim_next().job_id == 'job-one'
+    restarted.finish_queue_item('job-one', failure, 'second failure')
+    assert PlaylistDB(path).claim_next() is None
+    assert rows(path, 'SELECT state FROM queue_items')[0]['state'] == failure
+
+
+def test_schema_v1_upgrade_preserves_existing_retry_budget(tmp_path):
+    path = tmp_path / 'legacy.db'
+    # The migration only adds to these existing v1 tables; retain a consumed
+    # budget before cleanup can delete its legacy scheduling row.
+    with sqlite3.connect(path) as connection:
+        connection.execute('CREATE TABLE playlist_jobs (job_id TEXT UNIQUE)')
+        connection.execute('CREATE TABLE queue_items (job_id TEXT, retry_count INTEGER)')
+        connection.execute("INSERT INTO playlist_jobs VALUES ('job-one')")
+        connection.execute("INSERT INTO queue_items VALUES ('job-one', 1)")
+        connection.execute('PRAGMA user_version=1')
+    PlaylistDB(path)
+    assert rows(path, 'SELECT retry_count FROM playlist_jobs')[0]['retry_count'] == 1
+    with sqlite3.connect(path) as connection:
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 2
+        connection.execute('DELETE FROM queue_items')
+    PlaylistDB(path)
+    assert rows(path, 'SELECT retry_count FROM playlist_jobs')[0]['retry_count'] == 1

@@ -40,7 +40,7 @@ class PlaylistDB:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._write() as connection:
             version = connection.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise ValueError(f'Unsupported database version: {version}')
             if version == 0:
                 connection.execute('''CREATE TABLE playlists (
@@ -81,6 +81,14 @@ class PlaylistDB:
                     FOREIGN KEY (job_id, video_id) REFERENCES playlist_jobs(job_id, video_id))''')
                 connection.execute('CREATE INDEX queue_state_position ON queue_items(state, position, created_at)')
                 connection.execute('PRAGMA user_version = 1')
+            if version in (0, 1):
+                # Job links survive queue cleanup, so retry history belongs here.
+                connection.execute('''ALTER TABLE playlist_jobs ADD COLUMN
+                    retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 1)''')
+                connection.execute('''UPDATE playlist_jobs SET retry_count=COALESCE((
+                    SELECT retry_count FROM queue_items q
+                    WHERE q.job_id=playlist_jobs.job_id), 0)''')
+                connection.execute('PRAGMA user_version = 2')
 
     @contextmanager
     def _connect(self):
@@ -228,8 +236,12 @@ class PlaylistDB:
                 if row['video_id'] != video_id:
                     raise sqlite3.IntegrityError('Job already queued for another video')
                 return QueueItem(**dict(row))
-            connection.execute('''INSERT INTO queue_items (job_id, video_id, created_at)
-                VALUES (?, ?, ?)''', (job_id, video_id, time.time()))
+            history = connection.execute(
+                'SELECT retry_count FROM playlist_jobs WHERE job_id=?', (job_id,)
+            ).fetchone()
+            connection.execute('''INSERT INTO queue_items (job_id, video_id, created_at, retry_count)
+                VALUES (?, ?, ?, ?)''',
+                (job_id, video_id, time.time(), history['retry_count'] if history else 0))
             return QueueItem(**dict(connection.execute(
                 'SELECT * FROM queue_items WHERE job_id=?', (job_id,)).fetchone()))
 
@@ -262,6 +274,8 @@ class PlaylistDB:
         if row is None or row['state'] != 'processing':
             return
         retry = state in ('failed', 'interrupted') and row['retry_count'] == 0
+        connection.execute('UPDATE playlist_jobs SET retry_count=? WHERE job_id=?',
+                           (int(retry) + row['retry_count'], job_id))
         connection.execute('''UPDATE queue_items SET state=?, retry_count=?,
             error=?, finished_at=? WHERE job_id=?''',
             ('waiting' if retry else state, int(retry) + row['retry_count'],
