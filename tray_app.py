@@ -66,6 +66,7 @@ class SyncCoordinator:
                 else:
                     # The lock owner alone consumes requests. Requests published
                     # after this unlink remain for exactly one follow-up run.
+                    dispatched = False
                     try:
                         if self.marker_path.exists():
                             self.marker_path.unlink()
@@ -73,12 +74,16 @@ class SyncCoordinator:
                             self._worker = threading.Thread(
                                 target=self._sync, args=(lock,), daemon=True)
                             self._worker.start()
-                        else:
+                            dispatched = True
+                    except OSError as exc:
+                        # Windows cannot unlink while request_sync's creation
+                        # handle is open. Keep the request for the next poll.
+                        if getattr(exc, 'winerror', None) not in (32, 33):
+                            raise
+                    finally:
+                        if not dispatched:
+                            self.syncing = False
                             lock.__exit__(None, None, None)
-                    except BaseException:
-                        self.syncing = False
-                        lock.__exit__(None, None, None)
-                        raise
             (self.wait or stop_event.wait)(self.poll_interval)
 
 
@@ -213,7 +218,9 @@ class TrayController:
             finally:
                 self.exit()
                 for thread in self._threads:
-                    thread.join(timeout=2)
+                    # Public loops return promptly for blocked discovery or
+                    # preparation, but the queue loop must finish child cleanup.
+                    thread.join()
 
 
 def main(data_dir=None):

@@ -1,5 +1,6 @@
 """Tray scheduling tests use real marker files/locks and no notification area."""
 import subprocess
+import os
 import sys
 import threading
 import time
@@ -461,3 +462,172 @@ def test_coordinator_unexpected_service_failure_allows_manual_retry(tmp_path):
     assert coordinator.error == ''
     with WorkerLock(tmp_path / 'sync.lock'):
         pass
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows file sharing semantics')
+def test_coordinator_retries_marker_held_open_by_request_writer(tmp_path):
+    from worker import WorkerLock
+    db = PlaylistDB(tmp_path / 'videoscript.db')
+    db.set_auto_sync_paused(True)
+    marker = tmp_path / 'sync.requested'
+    stop = threading.Event()
+    service = Service(db, stop.set)
+    # Reproduce request_sync's exclusive creation handle before its close.
+    writer = marker.open('xb')
+    polls = []
+
+    def wait(seconds):
+        polls.append(1)
+        if not writer.closed:
+            assert service.calls == []
+            assert marker.exists()
+            # A failed consume attempt must release the sync critical section.
+            with WorkerLock(tmp_path / 'sync.lock'):
+                pass
+            if len(polls) == 3:
+                writer.close()
+        assert len(polls) < 100
+        time.sleep(.002)
+
+    coordinator = coordinator_type()(service, wait=wait)
+    try:
+        coordinator.run(stop)
+    finally:
+        writer.close()
+        if coordinator._worker:
+            coordinator._worker.join(2)
+    assert len(service.calls) == 1
+    assert not marker.exists()
+    with WorkerLock(tmp_path / 'sync.lock'):
+        pass
+
+
+def test_tray_exit_waits_for_forced_child_termination(tmp_path, monkeypatch):
+    from pipeline import JobStore
+    from queue_runner import QueueRunner
+    from tray_app import TrayController
+    import worker
+    db = PlaylistDB(tmp_path / 'videoscript.db')
+    store = JobStore(tmp_path / 'jobs')
+    playlist = db.add_or_reactivate_playlist('PL-test', 'url', 'Playlist')
+    db.apply_snapshot(playlist.id, [{'video_id': 'aaaaaaaaaaa'}], 100)
+    job = store.create('Unresponsive child', 'youtube',
+                       'https://www.youtube.com/watch?v=aaaaaaaaaaa')
+    db.link_job('aaaaaaaaaaa', job['id'], 'pending')
+    db.enqueue(job['id'], 'aaaaaaaaaaa')
+    db.claim_next()
+    child = subprocess.Popen([sys.executable, '-c',
+                              'import time; print("ready", flush=True); time.sleep(60)'],
+                             stdout=subprocess.PIPE, text=True)
+    active = QueueRunner(db, store, poll_interval=.01)
+    polled = threading.Event()
+    terminated = []
+    real_poll = active._poll
+    real_terminate = worker.terminate_process
+
+    def poll(item):
+        result = real_poll(item)
+        if result.state == 'processing':
+            polled.set()
+        return result
+
+    def terminate(pid, identity=None):
+        result = real_terminate(pid, identity)
+        terminated.append((pid, result))
+        return result
+
+    monkeypatch.setattr(active, '_poll', poll)
+    monkeypatch.setattr(worker, 'terminate_process', terminate)
+
+    def exit_when_active(controller):
+        assert polled.wait(2)
+        controller.exit()
+
+    controller = TrayController(db, Loop(), active,
+                                icon_factory=lambda c: Icon(c, exit_when_active))
+    try:
+        assert child.stdout.readline().strip() == 'ready'
+        store.update_fields(job['id'], status='running', worker_pid=child.pid,
+                            worker_identity=worker.process_identity(child.pid))
+        controller.run()
+        # stop_worker waits five seconds, then forces this non-cooperating child
+        # to terminate. Returning before then abandons the active transcription.
+        assert not worker.process_is_running(child.pid)
+        assert terminated == [(child.pid, True)]
+        assert store.load(job['id'])['worker_pid'] is None
+        with db._connect() as connection:
+            row = connection.execute('SELECT state, retry_count FROM queue_items').fetchone()
+        assert (row['state'], row['retry_count']) == ('waiting', 1)
+    finally:
+        controller.exit()
+        for thread in controller._threads:
+            thread.join(8)
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=5)
+        child.stdout.close()
+
+
+def test_tray_exit_keeps_blocked_discovery_and_preparation_interruptible(tmp_path, monkeypatch):
+    from pipeline import JobStore
+    from queue_runner import QueueRunner
+    from tray_app import SyncCoordinator, TrayController
+    db = PlaylistDB(tmp_path / 'videoscript.db')
+    store = JobStore(tmp_path / 'jobs')
+    playlist = db.add_or_reactivate_playlist('PL-test', 'url', 'Playlist')
+    db.apply_snapshot(playlist.id, [{'video_id': 'aaaaaaaaaaa'}], 100)
+    job = store.create('Blocked preparation', 'youtube',
+                       'https://www.youtube.com/watch?v=aaaaaaaaaaa')
+    db.link_job('aaaaaaaaaaa', job['id'], 'pending')
+    db.enqueue(job['id'], 'aaaaaaaaaaa')
+    discovery_entered, preparation_entered = threading.Event(), threading.Event()
+    release, exited, queue_done = threading.Event(), threading.Event(), threading.Event()
+    launches = []
+
+    def discover():
+        discovery_entered.set()
+        assert release.wait(5)
+
+    def prepare(job_id, store, db):
+        preparation_entered.set()
+        assert release.wait(5)
+        return store.load(job_id)
+
+    active = QueueRunner(db, store, poll_interval=.01)
+    real_run_loop = active._run_loop
+
+    def run_loop(stop):
+        try:
+            real_run_loop(stop)
+        finally:
+            queue_done.set()
+
+    monkeypatch.setattr(active, '_run_loop', run_loop)
+    monkeypatch.setattr('queue_runner.prepare_playlist_job', prepare)
+    monkeypatch.setattr('queue_runner.launch_worker', lambda *a, **k: launches.append(a))
+
+    def exit_when_blocked(controller):
+        assert discovery_entered.wait(2)
+        assert preparation_entered.wait(2)
+        controller.exit()
+        exited.set()
+
+    coordinator = SyncCoordinator(Service(db, discover), poll_interval=.01)
+    controller = TrayController(db, coordinator, active,
+                                icon_factory=lambda c: Icon(c, exit_when_blocked))
+    public = threading.Thread(target=controller.run)
+    public.start()
+    try:
+        assert exited.wait(2)
+        public.join(1)
+        assert not public.is_alive()
+        assert not release.is_set()
+        assert launches == []
+    finally:
+        controller.exit()
+        release.set()
+        public.join(3)
+        if coordinator._worker:
+            coordinator._worker.join(2)
+        assert queue_done.wait(2)
+    assert launches == []
