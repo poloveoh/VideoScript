@@ -9,17 +9,17 @@
 ## RED/GREEN evidence
 
 - RED: before implementation, the Python runtime raised `ImportError: cannot import name 'canonical_youtube_playlist_url' from 'core'` for the API imported by the new URL tests.
-- GREEN: an inline focused assertion harness using controlled fake `YoutubeDL` data passed the URL accept/reject cases, snapshot extraction, canonical video URLs, metadata, retained original positions, de-duplication, no-download/extract-flat/no-cookie options, and playlist ID mismatch rejection.
+- RED during verification: the first fetch test run found the message assertion was case-sensitive (`playlist` versus `Playlist`), although `fetch_playlist` correctly raised `ValueError` for the mismatched ID. The assertion was corrected to match case-insensitively.
+- GREEN: the focused tests and full suite passed after that correction. The focused module uses controlled fake `YoutubeDL` data to cover URL accept/reject cases, snapshot extraction, canonical video URLs, metadata, retained original positions, de-duplication, no-download/extract-flat/no-cookie options, and playlist ID mismatch rejection.
 - `compileall` for the changed Python files passed; `git diff --check` passed.
 
 ## Tests and results
 
-- Focused URL tests (`pytest tests/test_playlist_sync.py -q -k canonical`): blocked before collection; runtime reports `No module named pytest`.
-- Focused fetch/snapshot tests (`pytest tests/test_playlist_sync.py -q -k fetch`): blocked before collection; runtime reports `No module named pytest`.
-- Full `tests/test_playlist_sync.py`: blocked before collection for the same reason.
-- Full suite (`pytest -q`): blocked before collection for the same reason.
-- Attempted `python -m pip install pytest`; package access failed because network access is denied in this environment.
-- Manual focused assertion harness: passed.
+- Focused URL tests, `C:\Users\USER\Documents\Codex\VideoScript\.venv\Scripts\python.exe -m pytest tests/test_playlist_sync.py -q -k canonical`: **3 passed, 11 deselected**.
+- Focused fetch/snapshot tests, `... -m pytest tests/test_playlist_sync.py -q -k fetch`: **2 passed, 12 deselected**.
+- Full Task 2 module, `... -m pytest tests/test_playlist_sync.py -q`: **14 passed**.
+- Full suite, `... -m pytest -q`: **115 passed, 1 skipped, 1 warning in 28.23s**. The warning is `ctranslate2` importing deprecated `pkg_resources`.
+- The first run used the bundled runtime, which lacked pytest; the project virtual environment above was subsequently located and used for all final test results. No packages were installed.
 
 ## Assumptions
 
@@ -30,4 +30,4 @@
 
 ## Commit
 
-Pending.
+Pending final commit hash.

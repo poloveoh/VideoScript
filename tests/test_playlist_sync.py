@@ -102,5 +102,5 @@ def test_fetch_playlist_rejects_ytdlp_playlist_id_mismatch(monkeypatch):
     seen = {}
     _install_fake_ytdlp(monkeypatch,
                         {'id': 'PLother', 'title': 'Wrong', 'entries': []}, seen)
-    with pytest.raises(ValueError, match='playlist'):
+    with pytest.raises(ValueError, match='(?i)playlist'):
         fetch_playlist('https://youtube.com/playlist?list=PLrequested')
