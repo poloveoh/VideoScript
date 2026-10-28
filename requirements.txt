@@ -5,3 +5,4 @@ setuptools==80.9.0
 av>=11,<17
 yt-dlp[default]
 imageio-ffmpeg>=0.6,<1
+pystray==0.19.5

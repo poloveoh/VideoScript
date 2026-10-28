@@ -54,6 +54,28 @@ def canonical_youtube_url(value: str) -> str:
     return f'https://www.youtube.com/watch?v={video_id}'
 
 
+def canonical_youtube_playlist_url(value: str) -> tuple[str, str]:
+    """Return a canonical HTTPS YouTube Playlist URL and its ID."""
+    try:
+        parsed = urlparse(value.strip())
+        host = (parsed.hostname or '').lower()
+        port = parsed.port
+        query = parse_qs(parsed.query, keep_blank_values=True)
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError('请输入有效的 HTTPS YouTube 播放列表链接。') from None
+    if (parsed.scheme != 'https' or '@' in parsed.netloc
+            or port not in (None, 443)
+            or host not in {'youtube.com', 'www.youtube.com', 'm.youtube.com',
+                            'music.youtube.com'}
+            or parsed.path != '/playlist'):
+        raise ValueError('请输入有效的 HTTPS YouTube 播放列表链接。')
+    playlist_ids = query.get('list', [])
+    if len(playlist_ids) != 1 or not re.fullmatch(r'[A-Za-z0-9_-]+', playlist_ids[0]):
+        raise ValueError('请输入有效的 HTTPS YouTube 播放列表链接。')
+    playlist_id = playlist_ids[0]
+    return f'https://www.youtube.com/playlist?list={playlist_id}', playlist_id
+
+
 def parse_json3(data: dict) -> list[dict]:
     result = []
     previous_text, previous_end = '', -1

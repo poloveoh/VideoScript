@@ -21,6 +21,14 @@ MODEL_LOCK = threading.Lock()
 STORE_LOCK = threading.RLock()
 
 
+def extract_youtube_video_id(url: str) -> str | None:
+    """Extract an exact video identity using the existing URL policy."""
+    try:
+        return canonical_youtube_url(url).rsplit('=', 1)[1]
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def output_filenames(job):
     """Old jobs keep their existing files; new jobs use the video title."""
     if job.get('output_naming') == 'title':
@@ -30,7 +38,7 @@ def output_filenames(job):
 
 
 @contextmanager
-def _file_lock(path):
+def _file_lock(path, timeout=10):
     """Serialize job reads/writes across Streamlit and worker processes."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,23 +47,33 @@ def _file_lock(path):
         handle.write(b'0')
         handle.flush()
     handle.seek(0)
-    if os.name == 'nt':
-        import msvcrt
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-    else:
-        import fcntl
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    acquired = False
     try:
+        deadline = time.monotonic() + timeout
+        while not acquired:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f'Timed out waiting for storage lock: {path}')
+                time.sleep(.02)
         yield
     finally:
-        handle.seek(0)
-        if os.name == 'nt':
-            import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        try:
+            if acquired:
+                handle.seek(0)
+                if os.name == 'nt':
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 class JobStore:
@@ -135,12 +153,53 @@ class JobStore:
         return self.root / job_id
 
     def create(self, title, source, url):
+        return self.create_or_reconcile(title, source, url)[0]
+
+    def reconcile_youtube(self, video_id, operation):
+        """Run only identity lookup/persistence here, never network or recognition."""
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+            raise ValueError('Invalid YouTube Video ID')
+        with STORE_LOCK:
+            with _file_lock(self.root / '.youtube-identity.lock'):
+                return operation()
+
+    def create_or_reconcile(self, title, source, url):
+        video_id = extract_youtube_video_id(url) if source == 'youtube' else None
+        if video_id:
+            def resolve():
+                existing = self.find_youtube_job(video_id)
+                if existing is not None:
+                    return existing, False
+                return self._create(title, source, url), True
+            return self.reconcile_youtube(video_id, resolve)
+        return self._create(title, source, url), True
+
+    def _create(self, title, source, url):
         job = {'id': uuid.uuid4().hex, 'title': title, 'source': source,
                'url': url, 'created': time.time(), 'status': 'running',
                'segments': [], 'error': '', 'edited_text': None,
                'output_naming': 'title'}
         self.save(job)
         return job
+
+    def find_youtube_job(self, video_id: str) -> dict | None:
+        """Prefer explicit identity, then legacy URLs, without rewriting jobs."""
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+            return None
+        candidates = []
+        for job in self.list():
+            if job.get('source') != 'youtube':
+                continue
+            explicit = job.get('youtube_video_id')
+            if explicit == video_id:
+                candidates.append((0, job))
+            elif not explicit and extract_youtube_video_id(job.get('url')) == video_id:
+                candidates.append((1, job))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: (
+            item[0], item[1].get('status') != 'complete', item[1]['id'],
+        ))[1]
 
     def save(self, job):
         with STORE_LOCK:
@@ -326,11 +385,12 @@ def read_caption(path):
         raise ValueError('字幕无法读取；可能是网络限制或无效字幕，请尝试其他字幕或本地转录。') from exc
 
 
-def extract_captions(info, choice, store, job):
+def extract_captions(info, choice, store, job, *, track=None):
     from yt_dlp import YoutubeDL
     kind, language = choice
     tracks = info['subtitles' if kind == 'manual' else 'automatic_captions'][language]
-    track = next(t for t in tracks if t.get('ext') == 'json3')
+    if track is None:
+        track = next(t for t in tracks if t.get('ext') == 'json3')
     path = store.directory(job['id']) / 'captions.json3'
     try:
         with YoutubeDL(_options()) as ydl:
