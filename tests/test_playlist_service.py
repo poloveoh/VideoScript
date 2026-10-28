@@ -213,3 +213,182 @@ def test_invalid_and_duplicate_video_ids_never_create_jobs(setup):
     service.fetcher = lambda _: snapshot(VIDEO, VIDEO, VIDEO + 'X')
     service.sync_playlist(playlist.id)
     assert len(store.list()) == len(rows(db, 'playlist_videos')) == 1
+
+
+@pytest.mark.parametrize('first', ['playlist', 'manual'])
+def test_manual_and_playlist_submissions_share_identity(setup, first):
+    db, store, playlist, service = setup
+    if first == 'playlist':
+        service.sync_playlist(playlist.id)
+    manual = store.create('Manual', 'youtube', 'https://youtu.be/abcdefghijk')
+    service.sync_playlist(playlist.id)
+    assert len(store.list()) == 1
+    assert db.find_job_id(VIDEO) == manual['id']
+    assert store.create('Again', 'youtube', manual['url'])['id'] == manual['id']
+    assert store.create('Local', 'local', '')['id'] != store.create('Local', 'local', '')['id']
+
+
+def test_concurrent_manual_and_playlist_processes_share_identity(setup, tmp_path):
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+    db, store, playlist, _ = setup
+    script = '''
+import sys, time
+from pathlib import Path
+from pipeline import JobStore
+from playlist_db import PlaylistDB
+from playlist_service import PlaylistService
+from playlist_sync import PlaylistSnapshot, PlaylistVideo
+root, dbpath, mode = sys.argv[1:]
+store = JobStore(Path(root) / 'jobs')
+db = PlaylistDB(dbpath)
+save = store.save
+def slow_save(job):
+    time.sleep(.25)
+    return save(job)
+store.save = slow_save
+(Path(root) / (mode + '.ready')).touch()
+deadline = time.monotonic() + 10
+while not (Path(root) / 'go').exists():
+    if time.monotonic() > deadline: raise RuntimeError('start timeout')
+    time.sleep(.01)
+if mode == 'manual':
+    store.create('Manual', 'youtube', 'https://youtu.be/abcdefghijk')
+else:
+    snapshot = PlaylistSnapshot('PLtest', 'Playlist', 'url', [
+        PlaylistVideo('abcdefghijk', 'Playlist video', 'https://youtu.be/abcdefghijk', 1, 12, 'en')])
+    result = PlaylistService(db, store, lambda _: snapshot).sync_playlist(1)
+    assert not result.error, result.error
+'''
+    processes = [subprocess.Popen([sys.executable, '-c', script, str(tmp_path), str(db.path), mode],
+                                 cwd=Path(__file__).resolve().parents[1],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for mode in ('manual', 'playlist')]
+    try:
+        deadline = time.monotonic() + 10
+        while not all((tmp_path / (mode + '.ready')).exists() for mode in ('manual', 'playlist')):
+            assert time.monotonic() < deadline, 'children did not reach start barrier'
+            time.sleep(.01)
+        (tmp_path / 'go').touch()
+        for process in processes:
+            output, error = process.communicate(timeout=15)
+            assert process.returncode == 0, output + error
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+    assert len(store.list()) == 1
+    assert db.find_job_id(VIDEO) == store.list()[0]['id']
+
+
+def test_identity_lock_is_released_after_reconciliation_failure(setup):
+    import subprocess
+    import sys
+    from pathlib import Path
+    _, store, _, _ = setup
+    def fail():
+        raise RuntimeError('persistence failure')
+    with pytest.raises(RuntimeError, match='persistence failure'):
+        store.reconcile_youtube(VIDEO, fail)
+    result = subprocess.run([sys.executable, '-c',
+        "from pipeline import JobStore; import sys; JobStore(sys.argv[1]).create('Manual', 'youtube', 'https://youtu.be/abcdefghijk')",
+        str(store.root)], cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert len(store.list()) == 1
+
+
+def test_identity_file_lock_times_out_and_can_be_reacquired(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from pipeline import _file_lock
+    path = tmp_path / '.youtube-identity.lock'
+    script = '''
+import sys
+from pipeline import _file_lock
+with _file_lock(sys.argv[1]):
+    print('locked', flush=True)
+    sys.stdin.readline()
+'''
+    process = subprocess.Popen([sys.executable, '-c', script, str(path)],
+        cwd=Path(__file__).resolve().parents[1], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert process.stdout.readline().strip() == 'locked'
+        with pytest.raises(TimeoutError, match='storage lock'):
+            with _file_lock(path, timeout=.05):
+                pytest.fail('entered an already held critical section')
+        process.communicate('\n', timeout=5)
+        assert process.returncode == 0
+        with _file_lock(path, timeout=.05):
+            assert path.exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+@pytest.mark.parametrize('terminal', ['failed', 'interrupted'])
+def test_manual_success_reconciles_terminal_queue_before_metadata_loss(setup, terminal):
+    db, store, playlist, service = setup
+    service.sync_playlist(playlist.id)
+    for _ in range(2):
+        item = db.claim_next()
+        db.finish_queue_item(item.job_id, terminal, 'automatic failure')
+    assert rows(db, 'queue_items')[0]['state'] == terminal
+    store.update_fields(item.job_id, status='complete', segments=[
+        {'start': 0, 'end': 2, 'text': 'Manual retry succeeded.'}])
+    service.sync_playlist(playlist.id)
+    saved = rows(db, 'queue_items')[0]
+    assert saved['state'] == 'completed'
+    assert saved['retry_count'] == 1
+    assert saved['error'] == ''
+    assert saved['finished_at'] is not None
+    folder = store.directory(item.job_id)
+    transcript = (folder / 'Video abcdefghijk.txt').read_bytes()
+    (folder / 'job.json').unlink()
+    from playlist_service import PlaylistService
+    restarted = PlaylistService(PlaylistDB(db.path), JobStore(store.root), service.fetcher)
+    assert not restarted.sync_playlist(playlist.id).error
+    assert db.claim_next() is None
+    assert store.list() == []
+    assert (folder / 'Video abcdefghijk.txt').read_bytes() == transcript
+
+
+def test_playlist_whisper_fallback_cleans_download_and_preserves_transcript(setup, monkeypatch, tmp_path):
+    import playlist_processor
+    import worker
+    from pipeline import process_transcription
+    db, store, playlist, service = setup
+    service.sync_playlist(playlist.id)
+    item = db.claim_next()
+    monkeypatch.setattr(playlist_processor, 'inspect_youtube', lambda _: {})
+    playlist_processor.prepare_playlist_job(item.job_id, store, db)
+    downloaded = []
+    def download(url, folder, report):
+        audio = folder / 'audio.webm'
+        audio.write_bytes(b'downloaded audio')
+        downloaded.append(audio)
+        return audio
+    def transcribe(path, size, language, glossary, store, job, report):
+        return process_transcription(store, job, [
+            {'start': 0, 'end': 2, 'text': 'Whisper transcript survives.'}], 2, report)
+    monkeypatch.setattr(worker, 'download_audio', download)
+    monkeypatch.setattr(worker, 'transcribe', transcribe)
+    external = tmp_path / 'original.wav'
+    external.write_bytes(b'user original')
+    result = worker.run_job(item.job_id, store, tmp_path / 'worker.lock')
+    assert result['status'] == 'complete'
+    assert result['cleanup_status'] == 'complete'
+    assert not downloaded[0].exists()
+    assert (store.directory(item.job_id) / 'Video abcdefghijk.txt').read_text('utf-8') == 'Whisper transcript survives.'
+    assert (store.directory(item.job_id) / 'Video abcdefghijk.srt').exists()
+    local = store.create('Original', 'local', '')
+    store.update_fields(local['id'], media_path=str(external),
+                        media_managed=False, auto_cleanup_media=True)
+    assert worker.run_job(local['id'], store, tmp_path / 'worker.lock')['cleanup_status'] == 'not_managed'
+    assert external.read_bytes() == b'user original'

@@ -235,6 +235,11 @@ class PlaylistDB:
             if row is not None:
                 if row['video_id'] != video_id:
                     raise sqlite3.IntegrityError('Job already queued for another video')
+                if completed and row['state'] != 'completed':
+                    connection.execute('''UPDATE queue_items SET state='completed',
+                        error='', finished_at=? WHERE job_id=?''', (time.time(), job_id))
+                    row = connection.execute('SELECT * FROM queue_items WHERE job_id=?',
+                                             (job_id,)).fetchone()
                 return QueueItem(**dict(row))
             history = connection.execute(
                 'SELECT retry_count FROM playlist_jobs WHERE job_id=?', (job_id,)

@@ -38,7 +38,7 @@ def output_filenames(job):
 
 
 @contextmanager
-def _file_lock(path):
+def _file_lock(path, timeout=10):
     """Serialize job reads/writes across Streamlit and worker processes."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,23 +47,33 @@ def _file_lock(path):
         handle.write(b'0')
         handle.flush()
     handle.seek(0)
-    if os.name == 'nt':
-        import msvcrt
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-    else:
-        import fcntl
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    acquired = False
     try:
+        deadline = time.monotonic() + timeout
+        while not acquired:
+            try:
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f'Timed out waiting for storage lock: {path}')
+                time.sleep(.02)
         yield
     finally:
-        handle.seek(0)
-        if os.name == 'nt':
-            import msvcrt
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        handle.close()
+        try:
+            if acquired:
+                handle.seek(0)
+                if os.name == 'nt':
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 class JobStore:
@@ -143,6 +153,28 @@ class JobStore:
         return self.root / job_id
 
     def create(self, title, source, url):
+        return self.create_or_reconcile(title, source, url)[0]
+
+    def reconcile_youtube(self, video_id, operation):
+        """Run only identity lookup/persistence here, never network or recognition."""
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+            raise ValueError('Invalid YouTube Video ID')
+        with STORE_LOCK:
+            with _file_lock(self.root / '.youtube-identity.lock'):
+                return operation()
+
+    def create_or_reconcile(self, title, source, url):
+        video_id = extract_youtube_video_id(url) if source == 'youtube' else None
+        if video_id:
+            def resolve():
+                existing = self.find_youtube_job(video_id)
+                if existing is not None:
+                    return existing, False
+                return self._create(title, source, url), True
+            return self.reconcile_youtube(video_id, resolve)
+        return self._create(title, source, url), True
+
+    def _create(self, title, source, url):
         job = {'id': uuid.uuid4().hex, 'title': title, 'source': source,
                'url': url, 'created': time.time(), 'status': 'running',
                'segments': [], 'error': '', 'edited_text': None,

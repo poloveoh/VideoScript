@@ -3,7 +3,7 @@ from dataclasses import asdict, dataclass
 import time
 import uuid
 
-from pipeline import STORE_LOCK, extract_youtube_video_id
+from pipeline import extract_youtube_video_id
 from playlist_sync import fetch_playlist
 
 
@@ -31,6 +31,7 @@ class PlaylistService:
             'created': time.time(), 'status': 'waiting', 'segments': [],
             'error': '', 'edited_text': None, 'output_naming': 'title',
             'model': 'medium', 'discovery_source': 'playlist',
+            'media_managed': True, 'auto_cleanup_media': True,
             'discovery_playlist_id': playlist_id,
             'discovery_marker': f'youtube:{video.video_id}',
         }
@@ -80,9 +81,11 @@ class PlaylistService:
                 videos.append(video)
             # Filesystem writes only begin after the snapshot transaction commits.
             self.db.apply_snapshot(playlist_id, [asdict(video) for video in videos], started)
-            with STORE_LOCK:
-                for video in videos:
-                    self._sync_video(video, playlist_id, summary)
+            for video in videos:
+                self.store.reconcile_youtube(
+                    video.video_id,
+                    lambda: self._sync_video(video, playlist_id, summary),
+                )
             self.db.remove_unreferenced_waiting()
         except Exception as exc:
             summary.error = str(exc)

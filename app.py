@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 import sys
 
 
@@ -93,49 +94,53 @@ with st.expander('Playlist 管理 · 自动同步', expanded=True):
     from playlist_db import PlaylistDB
     from tray_app import request_sync
 
-    playlist_db = PlaylistDB(DATA / 'videoscript.db')
-    st.caption('托盘每 10 分钟同步；新增视频按 FIFO 顺序处理。刷新页面不会联网同步。')
-    with st.form('playlist_form'):
-        playlist_url = st.text_input('Playlist URL', key='playlist_url')
-        add_playlist = st.form_submit_button('添加 / 重新启用 Playlist', key='add_playlist')
-    if add_playlist:
-        try:
-            canonical, playlist_id = canonical_youtube_playlist_url(playlist_url)
-            playlist_db.add_or_reactivate_playlist(playlist_id, canonical, playlist_id)
+    try:
+        playlist_db = PlaylistDB(DATA / 'videoscript.db')
+        st.caption('托盘每 10 分钟同步；新增视频按 FIFO 顺序处理。刷新页面不会联网同步。')
+        with st.form('playlist_form'):
+            playlist_url = st.text_input('Playlist URL', key='playlist_url')
+            add_playlist = st.form_submit_button('添加 / 重新启用 Playlist', key='add_playlist')
+        if add_playlist:
+            try:
+                canonical, playlist_id = canonical_youtube_playlist_url(playlist_url)
+                playlist_db.add_or_reactivate_playlist(playlist_id, canonical, playlist_id)
+                request_sync(DATA / 'sync.requested')
+                st.success('Playlist 已保存，已请求后台同步。')
+            except ValueError as exc:
+                st.error(f'Playlist 链接无效：{exc}')
+        if st.button('Sync Now · 请求同步', key='sync_playlists'):
             request_sync(DATA / 'sync.requested')
-            st.success('Playlist 已保存，已请求后台同步。')
-        except ValueError as exc:
-            st.error(f'Playlist 链接无效：{exc}')
-    if st.button('Sync Now · 请求同步', key='sync_playlists'):
-        request_sync(DATA / 'sync.requested')
-        st.success('已请求托盘后台同步。请确保托盘正在运行。')
-    st.caption('Auto Sync：' + ('已暂停' if playlist_db.auto_sync_paused() else '已启用'))
-    for playlist in playlist_db.list_playlists():
-        st.write(playlist.title)
-        st.caption(f"{'已启用' if playlist.enabled else '已停用'} · {playlist.video_count} 个视频 · "
-                   f'上次成功同步：{playlist.last_sync_success_at or "尚未同步"}')
-        if playlist.last_error:
-            st.warning(playlist.last_error)
-        action = 'disable' if playlist.enabled else 'enable'
-        if st.button('停用' if playlist.enabled else '启用', key=f'{action}_playlist_{playlist.id}'):
-            playlist_db.set_playlist_enabled(playlist.id, not playlist.enabled)
-            st.rerun()
-        confirmed = st.checkbox('确认移除 Playlist（保留文字稿）', key=f'confirm_remove_{playlist.id}')
-        if st.button('移除 Playlist', key=f'remove_playlist_{playlist.id}', disabled=not confirmed):
-            playlist_db.soft_remove_playlist(playlist.id)
-            st.rerun()
-    # Read-only views: the coordinator/runner own all queue transitions.
-    with playlist_db._connect() as connection:
-        discoveries = [dict(row) for row in connection.execute(
-            'SELECT title, video_id, first_seen_at FROM videos ORDER BY first_seen_at DESC LIMIT 20')]
-        fifo = [dict(row) for row in connection.execute(
-            'SELECT position, video_id, state, retry_count, error FROM queue_items ORDER BY position')]
-    st.caption('最近发现（最多 20 条）')
-    if discoveries:
-        st.dataframe(discoveries, hide_index=True, width='stretch')
-    st.caption('FIFO 队列（只读）')
-    if fifo:
-        st.dataframe(fifo, hide_index=True, width='stretch')
+            st.success('已请求托盘后台同步。请确保托盘正在运行。')
+        st.caption('Auto Sync：' + ('已暂停' if playlist_db.auto_sync_paused() else '已启用'))
+        for playlist in playlist_db.list_playlists():
+            st.write(playlist.title)
+            st.caption(f"{'已启用' if playlist.enabled else '已停用'} · {playlist.video_count} 个视频 · "
+                       f'上次成功同步：{playlist.last_sync_success_at or "尚未同步"}')
+            if playlist.last_error:
+                st.warning(playlist.last_error)
+            action = 'disable' if playlist.enabled else 'enable'
+            if st.button('停用' if playlist.enabled else '启用', key=f'{action}_playlist_{playlist.id}'):
+                playlist_db.set_playlist_enabled(playlist.id, not playlist.enabled)
+                st.rerun()
+            confirmed = st.checkbox('确认移除 Playlist（保留文字稿）', key=f'confirm_remove_{playlist.id}')
+            if st.button('移除 Playlist', key=f'remove_playlist_{playlist.id}', disabled=not confirmed):
+                playlist_db.soft_remove_playlist(playlist.id)
+                st.rerun()
+        # Read-only views: the coordinator/runner own all queue transitions.
+        with playlist_db._connect() as connection:
+            discoveries = [dict(row) for row in connection.execute(
+                'SELECT title, video_id, first_seen_at FROM videos ORDER BY first_seen_at DESC LIMIT 20')]
+            fifo = [dict(row) for row in connection.execute(
+                'SELECT position, video_id, state, retry_count, error FROM queue_items ORDER BY position')]
+        st.caption('最近发现（最多 20 条）')
+        if discoveries:
+            st.dataframe(discoveries, hide_index=True, width='stretch')
+        st.caption('FIFO 队列（只读）')
+        if fifo:
+            st.dataframe(fifo, hide_index=True, width='stretch')
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        st.error(f'Playlist 数据库不可用：{type(exc).__name__}: {exc}')
+        st.caption('请检查数据库文件及访问权限；手动视频和已保存的文字稿仍可使用。')
 
 source = st.radio('视频来源', ['YouTube 链接', '本地视频 / 音频'], horizontal=True, key='source')
 media = None
@@ -167,8 +172,10 @@ if source == 'YouTube 链接':
                                       format_func=lambda c: f"{c[1]} · {'创作者提供' if c[0] == 'manual' else '自动字幕'}")
                 st.caption('文字内容来自所选字幕。分段只调整阅读格式，不会自动修正识别错误。')
                 if st.button('生成文字稿', type='primary', key='get_captions'):
-                    job = store.create(info.get('title', 'YouTube'), 'youtube', st.session_state.video_url)
+                    job, created = store.create_or_reconcile(info.get('title', 'YouTube'), 'youtube', st.session_state.video_url)
                     st.session_state.active_job = job['id']
+                    if not created:
+                        st.rerun()
                     try:
                         with st.spinner('正在获取字幕并生成文字稿…'):
                             extract_captions(info, choice, store, job)
@@ -215,9 +222,11 @@ if media is not None or source == '本地视频 / 音频':
     )
     if st.button('开始本地转录', type='primary', disabled=media is None):
         title = info.get('title', 'YouTube 视频') if isinstance(media, str) else media.name
-        job = store.create(title, 'youtube' if isinstance(media, str) else 'local',
-                           st.session_state.video_url if isinstance(media, str) else '')
+        job, created = store.create_or_reconcile(title, 'youtube' if isinstance(media, str) else 'local',
+                                                st.session_state.video_url if isinstance(media, str) else '')
         st.session_state.active_job = job['id']
+        if not created:
+            st.rerun()
         try:
             if isinstance(media, str):
                 path = None
